@@ -1,0 +1,155 @@
+-- =============================================================================
+-- 0002 core / sites & gates — the physical checkpoint model used by every module
+-- Gates belong to a site. Allowed pass categories and time windows narrow a gate.
+-- Re-runnable: CREATE TABLE IF NOT EXISTS only.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS sites (
+    id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id           BIGINT UNSIGNED NOT NULL,
+    code                VARCHAR(32)     NOT NULL,
+    name                VARCHAR(255)    NOT NULL,
+    address             VARCHAR(255)    NULL,
+    city                VARCHAR(128)    NULL,
+    region              VARCHAR(128)    NULL,
+    country             CHAR(2)         NULL COMMENT 'ISO 3166-1 alpha-2',
+    latitude            DECIMAL(9, 6)   NULL,
+    longitude           DECIMAL(10, 7)  NULL,
+    timezone            VARCHAR(64)     NOT NULL DEFAULT 'Africa/Nairobi',
+    is_headquarters     TINYINT(1)      NOT NULL DEFAULT 0,
+    status              VARCHAR(16)     NOT NULL DEFAULT 'active',
+    settings            JSON            NULL,
+    created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at          DATETIME(6)     NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_sites_code (tenant_id, code),
+    UNIQUE KEY uk_sites_id_tenant (id, tenant_id) COMMENT 'composite target: children cannot cross tenants',
+    KEY idx_sites_status (tenant_id, status, deleted_at),
+    CONSTRAINT fk_sites_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT chk_sites_status CHECK (status IN ('active', 'inactive', 'archived')),
+    CONSTRAINT chk_sites_hq CHECK (is_headquarters IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS gates (
+    id                          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id                   BIGINT UNSIGNED NOT NULL,
+    site_id                     BIGINT UNSIGNED NOT NULL,
+    code                        VARCHAR(32)     NOT NULL,
+    name                        VARCHAR(255)    NOT NULL,
+    gate_type                   VARCHAR(24)     NOT NULL DEFAULT 'main' COMMENT 'main, staff, delivery, vehicle, service, emergency, parking',
+    direction                   VARCHAR(8)      NOT NULL DEFAULT 'both',
+    status                      VARCHAR(16)     NOT NULL DEFAULT 'active',
+    opens_at                    TIME            NULL COMMENT 'daily operating window start, tenant timezone',
+    closes_at                   TIME            NULL,
+    is_default                  TINYINT(1)      NOT NULL DEFAULT 0 COMMENT 'a single-entrance tenant never sees a picker',
+    is_public                   TINYINT(1)      NOT NULL DEFAULT 0,
+    requires_reason_on_override TINYINT(1)      NOT NULL DEFAULT 1,
+    same_gate_exit_required     TINYINT(1)      NOT NULL DEFAULT 0 COMMENT 'strict mode, overrides the tenant default',
+    offline_capable             TINYINT(1)      NOT NULL DEFAULT 0,
+    description                 VARCHAR(255)    NULL,
+    sort_order                  SMALLINT        NOT NULL DEFAULT 100,
+    settings                    JSON            NULL,
+    created_at                  DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at                  DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at                  DATETIME(6)     NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_gates_code (site_id, code),
+    UNIQUE KEY uk_gates_id_tenant (id, tenant_id),
+    KEY idx_gates_tenant_status (tenant_id, status, deleted_at),
+    KEY idx_gates_type (tenant_id, gate_type),
+    CONSTRAINT fk_gates_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT fk_gates_site FOREIGN KEY (site_id, tenant_id) REFERENCES sites (id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT chk_gates_direction CHECK (direction IN ('in', 'out', 'both')),
+    CONSTRAINT chk_gates_status CHECK (status IN ('active', 'disabled', 'maintenance', 'closed')),
+    CONSTRAINT chk_gates_type CHECK (gate_type IN ('main', 'staff', 'delivery', 'vehicle', 'service', 'emergency', 'parking', 'other')),
+    CONSTRAINT chk_gates_hours CHECK (closes_at IS NULL OR opens_at IS NULL OR closes_at <> opens_at),
+    CONSTRAINT chk_gates_flags CHECK (is_default IN (0, 1) AND is_public IN (0, 1) AND offline_capable IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS pass_categories (
+    id                  SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    category_key        VARCHAR(64)     NOT NULL,
+    name                VARCHAR(128)    NOT NULL,
+    module_key          VARCHAR(64)     NULL COMMENT 'module that owns this category',
+    description         VARCHAR(255)    NULL,
+    sort_order          SMALLINT        NOT NULL DEFAULT 100,
+    status              VARCHAR(16)     NOT NULL DEFAULT 'active',
+    created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_pass_categories_key (category_key),
+    CONSTRAINT fk_pass_categories_module FOREIGN KEY (module_key) REFERENCES modules (module_key) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_pass_categories_status CHECK (status IN ('active', 'inactive'))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS gate_categories (
+    gate_id             BIGINT UNSIGNED NOT NULL,
+    category_key        VARCHAR(64)     NOT NULL,
+    created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (gate_id, category_key),
+    KEY idx_gate_categories_category (category_key, gate_id),
+    CONSTRAINT fk_gate_categories_gate FOREIGN KEY (gate_id) REFERENCES gates (id) ON DELETE CASCADE,
+    CONSTRAINT fk_gate_categories_category FOREIGN KEY (category_key) REFERENCES pass_categories (category_key) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS gate_time_windows (
+    id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    gate_id             BIGINT UNSIGNED NOT NULL,
+    day_of_week         TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'ISO 1 Monday .. 7 Sunday, 0 = every day',
+    starts_at           TIME            NOT NULL,
+    closes_at           TIME            NOT NULL,
+    crosses_midnight    TINYINT(1)      NOT NULL DEFAULT 0,
+    category_key        VARCHAR(64)     NULL COMMENT 'window applies only to this pass category, NULL = all',
+    action              VARCHAR(16)     NOT NULL DEFAULT 'allow',
+    note                VARCHAR(255)    NULL,
+    is_active           TINYINT(1)      NOT NULL DEFAULT 1,
+    created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_gate_time_windows (gate_id, day_of_week, starts_at, closes_at),
+    KEY idx_gate_time_windows_active (gate_id, is_active),
+    CONSTRAINT fk_gate_time_windows_gate FOREIGN KEY (gate_id) REFERENCES gates (id) ON DELETE CASCADE,
+    CONSTRAINT fk_gate_time_windows_category FOREIGN KEY (category_key) REFERENCES pass_categories (category_key) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_gate_time_windows_day CHECK (day_of_week BETWEEN 0 AND 7),
+    CONSTRAINT chk_gate_time_windows_action CHECK (action IN ('allow', 'block', 'warn')),
+    CONSTRAINT chk_gate_time_windows_active CHECK (is_active IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS gate_devices (
+    id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id           BIGINT UNSIGNED NOT NULL,
+    site_id             BIGINT UNSIGNED NOT NULL,
+    gate_id             BIGINT UNSIGNED NULL,
+    device_token_hash   CHAR(64)        NOT NULL COMMENT 'SHA-256 of the device secret, the raw token is never stored',
+    short_code          VARCHAR(16)     NULL COMMENT 'typed into the device to claim it',
+    label               VARCHAR(128)    NOT NULL,
+    kind                VARCHAR(24)     NOT NULL DEFAULT 'tablet',
+    platform            VARCHAR(32)     NULL COMMENT 'android, ios, linux, esp32',
+    app_version         VARCHAR(32)     NULL,
+    pin_code_hash       CHAR(64)        NULL COMMENT 'shared-device guard PIN, the gate comes from the device not the browser',
+    is_shared           TINYINT(1)      NOT NULL DEFAULT 0 COMMENT 'fixed tablet at a gate, picker is skipped',
+    is_active           TINYINT(1)      NOT NULL DEFAULT 1,
+    enrolled_at         DATETIME(6)     NULL,
+    last_seen_at        DATETIME(6)     NULL,
+    last_sync_at        DATETIME(6)     NULL,
+    sync_status         VARCHAR(16)     NOT NULL DEFAULT 'pending',
+    cache_version       BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'offline cache epoch the device currently holds',
+    cache_expires_at    DATETIME(6)     NULL,
+    revoked_at          DATETIME(6)     NULL,
+    metadata            JSON            NULL,
+    created_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at          DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_gate_devices_token (device_token_hash),
+    UNIQUE KEY uk_gate_devices_short_code (short_code),
+    KEY idx_gate_devices_gate (gate_id, is_active),
+    KEY idx_gate_devices_tenant (tenant_id, last_seen_at),
+    CONSTRAINT fk_gate_devices_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT fk_gate_devices_site FOREIGN KEY (site_id, tenant_id) REFERENCES sites (id, tenant_id) ON DELETE CASCADE,
+    -- optional reference, cleared not cascaded, so it stays single column (a composite SET NULL would null tenant_id too)
+    CONSTRAINT fk_gate_devices_gate FOREIGN KEY (gate_id) REFERENCES gates (id) ON DELETE SET NULL,
+    CONSTRAINT chk_gate_devices_kind CHECK (kind IN ('tablet', 'scanner', 'anpr_camera', 'turnstile', 'boom_gate', 'kiosk', 'mobile', 'other')),
+    CONSTRAINT chk_gate_devices_sync CHECK (sync_status IN ('pending', 'synced', 'error')),
+    CONSTRAINT chk_gate_devices_flags CHECK (is_shared IN (0, 1) AND is_active IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;

@@ -1,0 +1,21 @@
+# build output
+/bin/
+/dist/
+*.exe
+
+# local environment — never commit real credentials
+.env
+.env.*
+!.env.example
+code.txt
+
+# go
+*.test
+*.out
+coverage.html
+
+# editors and os noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

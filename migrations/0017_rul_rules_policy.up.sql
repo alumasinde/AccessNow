@@ -1,0 +1,110 @@
+-- =============================================================================
+-- 0017 module / rules & policy — automatic restrictions on requests and scans
+-- A rule is a scoped condition set plus one action. conditions_json holds the
+-- predicate tree the engine evaluates, so a new rule shape is data not schema.
+-- Rules run at request time and again at the gate, and every evaluation is
+-- logged so a red light can be explained later.
+-- Standalone default: required-field validation only.
+-- Re-runnable: CREATE TABLE IF NOT EXISTS only.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS rules (
+    id                      BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id               BIGINT UNSIGNED NOT NULL,
+    name                    VARCHAR(255)    NOT NULL,
+    description             VARCHAR(512)    NULL,
+    module_key              VARCHAR(64)     NULL COMMENT 'NULL = every enabled module',
+    pass_type_id            SMALLINT UNSIGNED NULL,
+    category_key            VARCHAR(64)     NULL,
+    site_id                 BIGINT UNSIGNED NULL,
+    gate_id                 BIGINT UNSIGNED NULL,
+    department_id           BIGINT UNSIGNED NULL,
+    stage                   VARCHAR(16)     NOT NULL DEFAULT 'both' COMMENT 'request, scan or both',
+    action                  VARCHAR(24)     NOT NULL,
+    action_payload          JSON            NULL COMMENT 'extra approval level, notify roles, quota limit',
+    conditions              JSON            NOT NULL COMMENT 'all/any tree of field, operator, value predicates',
+    priority                SMALLINT        NOT NULL DEFAULT 100 COMMENT 'lowest evaluated first, first blocking action wins',
+    severity                VARCHAR(16)     NOT NULL DEFAULT 'warning',
+    failure_message         VARCHAR(255)    NULL COMMENT 'shown to the guard, e.g. Use the Delivery Gate',
+    override_allowed        TINYINT(1)      NOT NULL DEFAULT 1,
+    effective_from          DATETIME(6)     NULL,
+    effective_until         DATETIME(6)     NULL,
+    version                 INT UNSIGNED    NOT NULL DEFAULT 1,
+    is_active               TINYINT(1)      NOT NULL DEFAULT 1,
+    created_by              BIGINT UNSIGNED NULL,
+    created_at              DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at              DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at              DATETIME(6)     NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_rules_id_tenant (id, tenant_id),
+    KEY idx_rules_match (tenant_id, is_active, stage, priority),
+    KEY idx_rules_module (tenant_id, module_key, is_active),
+    KEY idx_rules_gate (gate_id, is_active),
+    CONSTRAINT fk_rules_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT fk_rules_module FOREIGN KEY (module_key) REFERENCES modules (module_key) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT fk_rules_pass_type FOREIGN KEY (pass_type_id) REFERENCES pass_types (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_rules_category FOREIGN KEY (category_key) REFERENCES pass_categories (category_key) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT fk_rules_site FOREIGN KEY (site_id) REFERENCES sites (id) ON DELETE CASCADE,
+    CONSTRAINT fk_rules_gate FOREIGN KEY (gate_id) REFERENCES gates (id) ON DELETE CASCADE,
+    CONSTRAINT fk_rules_department FOREIGN KEY (department_id) REFERENCES departments (id) ON DELETE SET NULL,
+    CONSTRAINT fk_rules_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL,
+    CONSTRAINT chk_rules_stage CHECK (stage IN ('request', 'scan', 'both', 'nightly')),
+    CONSTRAINT chk_rules_action CHECK (action IN ('block', 'warn', 'require_approval', 'require_field', 'limit', 'notify', 'allow')),
+    CONSTRAINT chk_rules_severity CHECK (severity IN ('info', 'warning', 'critical')),
+    CONSTRAINT chk_rules_window CHECK (effective_until IS NULL OR effective_from IS NULL OR effective_until > effective_from),
+    CONSTRAINT chk_rules_flags CHECK (is_active IN (0, 1) AND override_allowed IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS rule_evaluations (
+    id                      BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id               BIGINT UNSIGNED NOT NULL,
+    rule_id                 BIGINT UNSIGNED NULL COMMENT 'NULL when no rule matched, kept for the miss rate',
+    stage                   VARCHAR(16)     NOT NULL,
+    outcome                 VARCHAR(24)     NOT NULL,
+    matched                 TINYINT(1)      NOT NULL DEFAULT 0,
+    pass_id                 BIGINT UNSIGNED NULL,
+    movement_id             BIGINT UNSIGNED NULL,
+    scan_id                 BIGINT UNSIGNED NULL,
+    gate_id                 BIGINT UNSIGNED NULL,
+    evaluated_at            DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    context                 JSON            NULL COMMENT 'the fields the engine was given, minus anything purged',
+    message                 VARCHAR(255)    NULL,
+    override_by_user_id     BIGINT UNSIGNED NULL,
+    override_reason         VARCHAR(512)    NULL,
+    latency_ms              INT UNSIGNED    NULL,
+    created_at              DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    KEY idx_rule_evaluations_rule (rule_id, evaluated_at),
+    KEY idx_rule_evaluations_tenant (tenant_id, outcome, evaluated_at),
+    KEY idx_rule_evaluations_pass (pass_id),
+    KEY idx_rule_evaluations_scan (scan_id),
+    CONSTRAINT fk_rule_evaluations_rule FOREIGN KEY (rule_id, tenant_id) REFERENCES rules (id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_rule_evaluations_pass FOREIGN KEY (pass_id) REFERENCES passes (id) ON DELETE SET NULL,
+    CONSTRAINT fk_rule_evaluations_movement FOREIGN KEY (movement_id) REFERENCES gate_movements (id) ON DELETE SET NULL,
+    CONSTRAINT fk_rule_evaluations_scan FOREIGN KEY (scan_id) REFERENCES scan_attempts (id) ON DELETE SET NULL,
+    CONSTRAINT fk_rule_evaluations_gate FOREIGN KEY (gate_id) REFERENCES gates (id) ON DELETE SET NULL,
+    CONSTRAINT fk_rule_evaluations_override FOREIGN KEY (override_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+    CONSTRAINT chk_rule_evaluations_stage CHECK (stage IN ('request', 'scan', 'both', 'nightly')),
+    CONSTRAINT chk_rule_evaluations_outcome CHECK (outcome IN ('passed', 'warned', 'blocked', 'approval_required', 'field_required', 'limit_reached', 'override_granted', 'no_match')),
+    CONSTRAINT chk_rule_evaluations_matched CHECK (matched IN (0, 1))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+CREATE TABLE IF NOT EXISTS rule_counter_buckets (
+    id                      BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id               BIGINT UNSIGNED NOT NULL,
+    rule_id                 BIGINT UNSIGNED NOT NULL,
+    bucket_key              VARCHAR(96)     NOT NULL COMMENT 'who or what is being counted, e.g. visitor:4412 or company:18',
+    period                  VARCHAR(12)     NOT NULL COMMENT 'hour, day, week, month, shift',
+    period_start            DATETIME(6)     NOT NULL,
+    used_count              INT UNSIGNED    NOT NULL DEFAULT 0,
+    limit_value             INT UNSIGNED    NULL COMMENT 'snapshot of the rule limit when the bucket opened',
+    exceeded_at             DATETIME(6)     NULL,
+    updated_at              DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    created_at              DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_rule_buckets (rule_id, bucket_key, period, period_start),
+    KEY idx_rule_buckets_tenant (tenant_id, bucket_key, period_start),
+    CONSTRAINT fk_rule_buckets_rule FOREIGN KEY (rule_id, tenant_id) REFERENCES rules (id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT chk_rule_buckets_period CHECK (period IN ('hour', 'day', 'week', 'month', 'shift', 'quarter', 'year')),
+    CONSTRAINT chk_rule_buckets_counts CHECK (used_count >= 0)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
