@@ -26,7 +26,9 @@ const materialColumns = `m.id, m.tenant_id, m.pass_id, m.kind, m.return_type, m.
 	m.vehicle_plate, m.waybill_ref, m.invoice_ref, m.po_ref, m.origin_reference,
 	m.destination_reference, m.destination_contact, m.gate_verification_required, m.seal_no,
 	m.expected_return_at, m.released_at, m.released_gate_id, m.closed_at, m.verified_at,
-	m.status, m.notes, m.created_at, p.pass_no, p.status AS pass_status`
+	m.status, m.notes, m.created_at, p.pass_no, p.status AS pass_status,
+	(SELECT COUNT(*) FROM material_items li
+	 WHERE li.tenant_id = m.tenant_id AND li.material_pass_id = m.id) AS line_count`
 
 const materialFrom = `
 	FROM   material_passes m

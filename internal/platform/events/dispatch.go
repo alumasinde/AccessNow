@@ -160,7 +160,7 @@ type stored struct {
 
 func (s stored) event() (Event, error) {
 	e := Event{
-		TenantID: s.TenantID, EventKey: s.EventKey, AggregateType: s.AggregateType,
+		EventID: s.ID, TenantID: s.TenantID, EventKey: s.EventKey, AggregateType: s.AggregateType,
 		AggregateID: s.AggregateID, PassID: s.PassID, SiteID: s.SiteID, GateID: s.GateID,
 		ActorUserID: s.ActorUserID, DedupeKey: s.DedupeKey,
 	}

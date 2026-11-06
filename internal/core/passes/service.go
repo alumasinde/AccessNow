@@ -111,6 +111,12 @@ func (s *Service) Decide(ctx context.Context, scope tenancy.Scope, passID int64,
 	if !current.Decidable() {
 		return Pass{}, errs.Conflict("pass " + current.PassNo + " is " + current.Status)
 	}
+	// Approving is a decision about a request, not a repair of history: a cancelled pass must
+	// not turn green at a barrier because an ask sat unanswered in somebody's inbox.
+	if to == StatusApproved && !current.AwaitingDecision() {
+		return Pass{}, errs.Conflict("pass " + current.PassNo + " is " + current.Status +
+			"; only a pass still waiting to be decided can be approved")
+	}
 	// Only an approval is guarded: refusing, cancelling and closing stay open to the desk,
 	// or a chain that nobody answers would strand the pass in both directions.
 	if to == StatusApproved && s.workflow != nil {

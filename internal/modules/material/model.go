@@ -55,6 +55,7 @@ type Material struct {
 	PassID               int64      `db:"pass_id"`
 	PassNo               string     `db:"pass_no"`
 	PassStatus           string     `db:"pass_status"`
+	LineCount            int        `db:"line_count"`
 	Kind                 string     `db:"kind"`
 	ReturnType           string     `db:"return_type"`
 	ItemCategory         *string    `db:"item_category"`

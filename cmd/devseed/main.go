@@ -79,6 +79,10 @@ approvals - three flows, one cover, all seeded for tenant %d:
         username %s-manager     password %s  holds site_manager, signs the expensive ones
         the supervisor is covered by %s-admin for the next week.
 
+notifications - email and sms use the log provider, so a notice is written to the API log:
+        GET /api/v1/notifications is the supervisor's inbox; goods releases are routed to the
+        requester, and an overdue step-out also mails duty@%s.example.
+
 next:
   go run ./cmd/api
   curl -X POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
@@ -87,5 +91,5 @@ next:
 		s.slug, s.adminEmail, s.adminPassword,
 		s.slug, s.guardPassword, out.GateID, out.DeviceToken,
 		out.TenantID, s.slug, s.guardPassword, s.slug, s.guardPassword, s.slug,
-		s.slug, s.slug, s.adminPassword)
+		s.slug, s.slug, s.slug, s.adminPassword)
 }

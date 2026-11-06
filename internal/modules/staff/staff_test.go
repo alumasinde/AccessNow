@@ -294,3 +294,23 @@ func TestOnMovementIgnoresEventsThatAreNotAnOutpassScan(t *testing.T) {
 		}
 	}
 }
+
+func TestALateEmployeeIsAlwaysInTheirFirstMinuteLate(t *testing.T) {
+	due := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	late := func(at time.Time) *int {
+		return Outpass{Status: string(StatusOut), ExpectedReturnAt: &due}.MinutesLate(at)
+	}
+	if got := late(due.Add(-30 * time.Minute)); got != nil {
+		t.Errorf("early = %v, nobody is late before the time they promised", *got)
+	}
+	if got := late(due.Add(30 * time.Second)); got == nil || *got != 1 {
+		t.Errorf("30s late = %v, and a notice quoting nothing cannot be acted on", got)
+	}
+	if got := late(due.Add(90 * time.Second)); got == nil || *got != 2 {
+		t.Errorf("90s late = %v, want 2 (rounded up, not down)", got)
+	}
+	back := Outpass{Status: string(StatusReturned), ExpectedReturnAt: &due}
+	if got := back.MinutesLate(due.Add(time.Hour)); got != nil {
+		t.Error("a row that has come back is not late any more")
+	}
+}

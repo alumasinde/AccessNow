@@ -115,6 +115,10 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 		if err := ensureFlows(ctx, c, tenant, out.SiteID, out.AdminID, out.SupervisorID); err != nil {
 			return err
 		}
+		// Same reason for the notification routes: one of them names the supervisor by id.
+		if err := ensureNotifySettings(ctx, c, tenant, out.SiteID, out.SupervisorID, s.slug); err != nil {
+			return err
+		}
 
 		return numbering.EnsureDefaults(ctx, c, tenant)
 	})

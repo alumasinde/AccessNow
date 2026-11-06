@@ -323,12 +323,16 @@ func (s *Service) escalate(ctx context.Context, scope tenancy.Scope, rows []Outp
 	from, to Status, key string) (int, error) {
 	moved := 0
 	for _, filed := range rows {
+		// The sweep has to carry the lateness the return path carries: the notice a tenant
+		// reads names {{minutes_out}}, and a blank there is a notice that cannot be acted on.
+		late := derefMinutes(filed.MinutesLate(time.Now().UTC()))
 		err := db.Transact(ctx, s.pool, func(c db.Conn) error {
 			ok, err := s.repo.In(c).MarkEscalated(ctx, scope.TenantID, filed.ID, from, to)
 			if err != nil || !ok {
 				return err
 			}
-			return s.publish(ctx, c, scope, filed, key, map[string]any{"swept": true})
+			return s.publish(ctx, c, scope, filed, key,
+				map[string]any{"swept": true, "minutes_out": late})
 		})
 		if err != nil {
 			return moved, err

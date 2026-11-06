@@ -127,6 +127,7 @@ func (s *Service) publish(ctx context.Context, c db.Conn, e events.Event, m Mate
 	payload := map[string]any{
 		"pass_no": m.PassNo, "kind": m.Kind, "return_type": m.ReturnType,
 		"declared_by": deref(m.DeclaredByName), "movement_id": e.AggregateID,
+		"lines": m.LineCount,
 	}
 	return s.publisher.Publish(ctx, c, events.Event{
 		TenantID: e.TenantID, EventKey: key, AggregateType: "material_pass",

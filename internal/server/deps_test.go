@@ -17,6 +17,9 @@ func TestEveryMountedHandlerIsBuilt(t *testing.T) {
 	if deps.Backlog == nil {
 		t.Error("backlog loop is not wired")
 	}
+	if deps.Delivery == nil {
+		t.Error("notification sweep loop is not wired")
+	}
 	for _, h := range []struct {
 		name    string
 		present bool
@@ -30,6 +33,7 @@ func TestEveryMountedHandlerIsBuilt(t *testing.T) {
 		{"Vehicle", deps.Vehicle != nil},
 		{"Staff", deps.Staff != nil},
 		{"Approval", deps.Approval != nil},
+		{"Notifications", deps.Notifications != nil},
 	} {
 		if !h.present {
 			t.Errorf("%s handler is not wired; its routes would panic", h.name)

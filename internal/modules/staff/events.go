@@ -86,7 +86,7 @@ func (s *Service) returned(ctx context.Context, e events.Event, filed Outpass) e
 			return nil
 		}
 		return s.publish(ctx, c, scopeOf(e), filed, "outpass.overdue", map[string]any{
-			"minutes_out": minutes, "closed_on_return": true,
+			"minutes_out": derefMinutes(filed.MinutesLate(now)), "closed_on_return": true,
 		})
 	})
 	if err != nil {

@@ -59,6 +59,14 @@ func (s *Service) Answer(ctx context.Context, scope tenancy.Scope, stepID int64,
 	if err != nil {
 		return Request{}, passes.Pass{}, err
 	}
+	// A chain only exists to decide a pass that is still asking. Someone else can settle a
+	// pass out from under an open chain - the desk cancels it, the clock runs out - and an
+	// answer given after that would commit an approved chain and a notice saying the pass is
+	// green, then have Core refuse the pass for being history. Refuse the whole turn instead.
+	if !p.AwaitingDecision() {
+		return Request{}, passes.Pass{}, errs.Conflict("this pass is already " + p.Status +
+			"; the approval chain has nothing left to decide")
+	}
 	if err := s.checkAsks(def, p, scope, in); err != nil {
 		return Request{}, passes.Pass{}, err
 	}
@@ -240,7 +248,7 @@ func (s *Service) Cancel(ctx context.Context, scope tenancy.Scope, requestID int
 		return Request{}, errs.Invalid("withdrawing a pass needs a reason",
 			errs.InvalidField("reason", "required"))
 	}
-	closed, err := s.close(ctx, scope, req, p, "approval.cancelled", reason)
+	closed, err := s.close(ctx, scope, req, p, "cancelled", reason)
 	if err != nil {
 		return Request{}, err
 	}
@@ -271,13 +279,13 @@ func (s *Service) Reset(ctx context.Context, scope tenancy.Scope, passID int64,
 	req, err := s.repo.OpenByPass(ctx, scope.TenantID, passID)
 	switch {
 	case err == nil:
-		if _, err := s.close(ctx, scope, req, p, "approval.reset", reason); err != nil {
+		if _, err := s.close(ctx, scope, req, p, "reset", reason); err != nil {
 			return Request{}, err
 		}
 	case errs.CodeOf(err) != errs.CodeNotFound:
 		return Request{}, err
 	}
-	if needsDecision(p.Status) {
+	if p.AwaitingDecision() {
 		return s.restart(ctx, scope, passID)
 	}
 	// The pass has been signed already, so the only way back to asking is through Core.
@@ -302,12 +310,22 @@ func (s *Service) restart(ctx context.Context, scope tenancy.Scope, passID int64
 }
 
 // close is the one way a chain stops without an approver's answer: the asks stop, the chain
-// becomes history, and the trail says who closed it and why.
+// becomes history, and the trail says who closed it and why. `outcome` is the bare word -
+// "cancelled", "reset" - because the event key and the audit action are the same name with
+// the same prefix, and a caller that passed "approval.cancelled" would publish
+// approval.approval.cancelled.
 func (s *Service) close(ctx context.Context, scope tenancy.Scope, req Request, p passes.Pass,
-	action, reason string) (Request, error) {
+	outcome, reason string) (Request, error) {
 	var closed Request
 	err := db.Transact(ctx, s.pool, func(c db.Conn) error {
 		repo := s.repo.In(c)
+		// Read the audience before the asks are recalled: the notice about a chain that
+		// stopped belongs to the people who were still being asked, and after this statement
+		// they are only history.
+		audience, err := repo.OpenAskAudience(ctx, req.TenantID, req.ID, p.SiteID)
+		if err != nil {
+			return err
+		}
 		if _, err := repo.CancelAsks(ctx, scope.TenantID, req.ID); err != nil {
 			return err
 		}
@@ -322,12 +340,13 @@ func (s *Service) close(ctx context.Context, scope tenancy.Scope, req Request, p
 		if err != nil {
 			return err
 		}
-		if err := s.publish(ctx, c, closed, p, "approval."+action, scope.UserID,
-			map[string]any{"reason": reason}); err != nil {
+		key := "approval." + outcome
+		if err := s.publish(ctx, c, closed, p, key, scope.UserID,
+			map[string]any{"reason": reason, "notify_user_ids": audience}); err != nil {
 			return err
 		}
 		return s.chain.Write(ctx, c, audit.Entry{
-			TenantID: scope.TenantID, ActorUserID: scope.UserID, Action: action,
+			TenantID: scope.TenantID, ActorUserID: scope.UserID, Action: key,
 			SubjectID: req.ID, PassID: req.PassID, SiteID: p.SiteID, Reason: reason,
 			Before: map[string]any{"status": req.Status},
 			After:  map[string]any{"status": closed.Status},
@@ -395,7 +414,7 @@ func (s *Service) escalateOne(ctx context.Context, scope tenancy.Scope, ask Requ
 	// A chain can outlive the decision it existed to make - the desk settled the pass while
 	// this module was switched off, for instance. Chasing an answer nobody is waiting for
 	// would only move a stale ask into somebody else's inbox.
-	if !needsDecision(p.Status) {
+	if !p.AwaitingDecision() {
 		return false, nil
 	}
 	target, ok := s.escalationTarget(ctx, def, p)

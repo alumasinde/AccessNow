@@ -166,6 +166,21 @@ func (o Outpass) MinutesOut(at time.Time) *int {
 	return &minutes
 }
 
+// MinutesLate is how far past the time the employee gave they still have not come back, in
+// whole minutes rounded up. It is the number an overdue notice quotes: a person thirty seconds
+// late is in their first minute late, and a notice that says "( minutes)" tells the duty desk
+// nothing it can act on.
+func (o Outpass) MinutesLate(at time.Time) *int {
+	if !o.Open() || o.ExpectedReturnAt == nil || !at.After(*o.ExpectedReturnAt) {
+		return nil
+	}
+	minutes := int(at.Sub(*o.ExpectedReturnAt).Seconds()+59) / 60
+	if minutes < 1 {
+		minutes = 1
+	}
+	return &minutes
+}
+
 // New is one outpass as the desk or the employee filed it, before the pass exists.
 type New struct {
 	StaffID          int64

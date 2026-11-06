@@ -26,9 +26,8 @@ func (s *Service) Start(ctx context.Context, tenantID, passID int64) error {
 	if err != nil {
 		return err
 	}
-	// pending, draft and pending_review are the three states that mean somebody still wants
-	// a decision - the last one because a returned pass comes back for a fresh chain.
-	if !needsDecision(p.Status) {
+	// The three states Core marks as still asking are the only reason a chain starts.
+	if !p.AwaitingDecision() {
 		return nil
 	}
 
@@ -337,17 +336,6 @@ func distinctStepNos(steps []FlowStep) []int {
 		out = append(out, step.StepNo)
 	}
 	return out
-}
-
-// needsDecision is the only reason a chain starts: the pass is still asking for a decision.
-func needsDecision(status string) bool {
-	switch status {
-	case string(passes.StatusPending), string(passes.StatusDraft),
-		string(passes.StatusPendingReview):
-		return true
-	default:
-		return false
-	}
 }
 
 func decidedStatus(from StepStatus) RequestStatus {

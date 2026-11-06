@@ -258,6 +258,45 @@ func (r *Repository) CancelAsks(ctx context.Context, tenantID, requestID int64) 
 	return result.RowsAffected()
 }
 
+// OpenAskAudience is the people a chain that stops without an answer has to tell: whoever
+// held a pending ask, whether it named them or named a role they hold. The catalogue addresses
+// approval.cancelled to "the approver", and no directory has a role by that word, so an event
+// without this list reaches nobody - including the supervisor who was about to answer.
+func (r *Repository) OpenAskAudience(ctx context.Context, tenantID, requestID, siteID int64) ([]int64, error) {
+	steps, err := r.StepsForRequest(ctx, tenantID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		out  []int64
+		seen = make(map[int64]bool)
+	)
+	for _, step := range steps {
+		if !step.Waiting() {
+			continue
+		}
+		if step.AssigneeUserID != nil {
+			if id := *step.AssigneeUserID; !seen[id] {
+				seen[id], out = true, append(out, id)
+			}
+			continue
+		}
+		if step.ApproverRoleKey == nil {
+			continue
+		}
+		people, err := r.RoleHolders(ctx, tenantID, *step.ApproverRoleKey, siteID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range personIDs(people) {
+			if !seen[id] {
+				seen[id], out = true, append(out, id)
+			}
+		}
+	}
+	return out, nil
+}
+
 // Recall takes an unanswered ask off its assignee, which is what an escalation does before
 // it asks somebody higher.
 func (r *Repository) Recall(ctx context.Context, tenantID, stepID int64) (bool, error) {

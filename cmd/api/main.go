@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	// A slim container image has no zoneinfo, and every reader's clock would silently be UTC.
+	_ "time/tzdata"
 
 	"accessnow/internal/platform/config"
 	"accessnow/internal/platform/db"
@@ -42,8 +44,10 @@ func run() error {
 
 	deps := server.Build(pool, cfg)
 	// A gate scan relays its own events inside the request. A desk write has no scan coming,
-	// so this loop is what delivers its events.
+	// so this loop is what delivers its events - and this is what gets the notices it filed
+	// out to a gateway, since a message that waits for the next badge is a message late.
 	go deps.Backlog.Run(ctx)
+	go deps.Delivery.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

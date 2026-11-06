@@ -12,6 +12,10 @@ import (
 )
 
 type Event struct {
+	// EventID is the domain_events row this event was read from. A producer never sets it:
+	// the relay fills it in, and a reactor that must hand out exactly one notice per event -
+	// notifications - has nothing else to key on. Aggregate and pass ids repeat by design.
+	EventID       int64
 	TenantID      int64
 	EventKey      string
 	AggregateType string

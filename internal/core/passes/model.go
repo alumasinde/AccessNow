@@ -78,6 +78,18 @@ func (p Pass) Decidable() bool {
 	return p.ClosedAt == nil && p.Status != string(StatusVoid) && p.Status != string(StatusCompleted)
 }
 
+// AwaitingDecision reports the statuses an approval can still land on: a pass that has been
+// cancelled, expired, refused or closed is history, and a stale ask in an approver's inbox
+// must not turn it green at the barrier again.
+func (p Pass) AwaitingDecision() bool {
+	switch p.Status {
+	case string(StatusDraft), string(StatusPending), string(StatusPendingReview):
+		return true
+	default:
+		return false
+	}
+}
+
 // Usable reports whether this pass may be honoured at a barrier at all. pending is a
 // request, not a permission, and completed is history: both must turn a gate red in
 // either direction, or an unapproved lorry walks out and a closed one walks out twice.

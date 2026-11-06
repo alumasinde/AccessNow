@@ -57,6 +57,30 @@ func TestDecidable(t *testing.T) {
 	}
 }
 
+// AwaitingDecision is the resurrection rule: an ask left unanswered in an inbox must not
+// approve a pass that the desk has already cancelled, refused or closed.
+func TestAwaitingDecision(t *testing.T) {
+	tests := []struct {
+		name   string
+		status Status
+		expect bool
+	}{
+		{"draft", StatusDraft, true},
+		{"pending", StatusPending, true},
+		{"pending review", StatusPendingReview, true},
+		{"cancelled", StatusCancelled, false},
+		{"expired", StatusExpired, false},
+		{"rejected", StatusRejected, false},
+		{"completed", StatusCompleted, false},
+		{"already approved", StatusApproved, false},
+	}
+	for _, tc := range tests {
+		if got := (Pass{Status: string(tc.status)}).AwaitingDecision(); got != tc.expect {
+			t.Errorf("%s: AwaitingDecision() = %v, want %v", tc.name, got, tc.expect)
+		}
+	}
+}
+
 // Usable is the barrier rule: pending is a request and completed is history, so a gate
 // must turn red for both, in either direction. Otherwise an unapproved lorry drives out
 // and a closed pass leaves the site twice.

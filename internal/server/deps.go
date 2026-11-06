@@ -14,6 +14,7 @@ import (
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/approval"
 	"accessnow/internal/modules/material"
+	"accessnow/internal/modules/notifications"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
@@ -33,10 +34,16 @@ const cacheTTL = 30 * time.Second
 // seconds is under a human noticing, and one pass per tenant per tick is cheap.
 const backlogEvery = 5 * time.Second
 
+// sweepEvery is how long a notice may wait for a gateway. It is looser than the relay tick
+// because a message that takes eleven seconds is late in a way nobody notices, while a queue
+// that dials a provider on every tick is a tenant paying for a burst.
+const sweepEvery = 10 * time.Second
+
 // Deps is the assembled application: one guard bundle and the handlers the router mounts.
 type Deps struct {
 	Guard     router.Guard
 	Backlog   *events.Backlog
+	Delivery  *notifications.DeliveryLoop
 	Auth      *auth.Handler
 	Gates     *gates.Handler
 	Passes    *passes.Handler
@@ -46,6 +53,8 @@ type Deps struct {
 	Vehicle   *vehicle.Handler
 	Staff     *staff.Handler
 	Approval  *approval.Handler
+
+	Notifications *notifications.Handler
 }
 
 func Build(pool *sqlx.DB, cfg config.Config) *Deps {
@@ -79,6 +88,10 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	staffSvc := staff.NewService(pool, staff.NewRepository(pool), passSvc, passRepo, bus)
 	approvalSvc := approval.NewService(pool, approval.NewRepository(pool), passSvc, chain, bus, accessSvc)
 	flow.Bind(approvalSvc)
+	// The notification provider's credentials come from the environment by name, so nothing
+	// in this wiring ever holds a secret it could log.
+	notificationsSvc := notifications.NewService(pool, notifications.NewRepository(pool),
+		accessSvc, chain, nil)
 
 	// All four reactions key off the same scan: the gate decides, the module's own row
 	// follows. A module switched off for a tenant hides its surface, not these handlers:
@@ -92,6 +105,19 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// issued in exactly one place, so a chain cannot be filed twice by two issuers, and a
 	// module never has to know the workflow exists.
 	registry.On("pass.issued", approvalSvc.OnPassIssued)
+	// And the same trigger ends one: whenever the pass leaves the asking states by any route,
+	// the chain that was asking about it is recalled and the people still holding an ask are
+	// told. An approver should never sit on a task that a desk already made moot.
+	for _, eventKey := range approval.SettledKeys() {
+		registry.On(eventKey, approvalSvc.OnPassSettled)
+	}
+
+	// Notifications is the one reactor that subscribes to a long list of keys rather than to
+	// the scan, because its whole job is what everybody else's events mean to a human. The
+	// list is the module's own, so adding an event is a change in one place.
+	for _, eventKey := range notifications.EventKeys() {
+		registry.On(eventKey, notificationsSvc.OnEvent)
+	}
 
 	guard := router.Guard{
 		Session:    auth.NewMiddleware(authSvc).Session,
@@ -104,6 +130,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	return &Deps{
 		Guard:     guard,
 		Backlog:   events.NewBacklog(relay, backlogEvery),
+		Delivery:  notifications.NewDeliveryLoop(notificationsSvc, sweepEvery),
 		Auth:      auth.NewHandler(authSvc, cfg),
 		Gates:     gates.NewHandler(gateSvc),
 		Passes:    passes.NewHandler(passSvc),
@@ -113,5 +140,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Vehicle:   vehicle.NewHandler(vehicleSvc),
 		Staff:     staff.NewHandler(staffSvc),
 		Approval:  approval.NewHandler(approvalSvc),
+
+		Notifications: notifications.NewHandler(notificationsSvc),
 	}
 }
