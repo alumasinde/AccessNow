@@ -20,6 +20,17 @@ const (
 	ResultOverride Result = "override"
 )
 
+// Opens reports whether a result let the subject through. Three colours do: the plain grant,
+// a warning the guard was told about, and a waiver somebody with the permission signed for.
+// Anything else left the barrier shut.
+//
+// This is the predicate every reaction to a scan has to agree on. A warned entry that does not
+// count as an entry is a person on site with no open movement to exit against, and a roster
+// that says nobody came.
+func (r Result) Opens() bool {
+	return r == ResultGranted || r == ResultWarned || r == ResultOverride
+}
+
 type Source string
 
 const (
@@ -43,6 +54,10 @@ type Scan struct {
 	SubjectName    string
 	Plate          string
 	OccurredAt     time.Time
+	// Override asks a rulebook refusal to be waived. It is a scan field rather than a
+	// separate endpoint because the person asking is at the barrier with the pass in hand,
+	// and the answer has to be the colour of this scan.
+	Override bool
 }
 
 type Movement struct {
@@ -77,9 +92,7 @@ type Outcome struct {
 	Status   string
 }
 
-func (o Outcome) Green() bool {
-	return o.Result == ResultGranted || o.Result == ResultWarned || o.Result == ResultOverride
-}
+func (o Outcome) Green() bool { return o.Result.Opens() }
 
 // Occupant is one row of the roll-call roster: still on site, with the minutes counted by
 // the view so the server never re-derives presence.

@@ -119,6 +119,11 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 		if err := ensureNotifySettings(ctx, c, tenant, out.SiteID, out.SupervisorID, s.slug); err != nil {
 			return err
 		}
+		// The rulebook comes last of the three: a rule that names a role or a pass category
+		// only means something once the desk surface and the flows it can require exist.
+		if err := ensureRulebook(ctx, c, tenant, out.SiteID, out.AdminID); err != nil {
+			return err
+		}
 
 		return numbering.EnsureDefaults(ctx, c, tenant)
 	})

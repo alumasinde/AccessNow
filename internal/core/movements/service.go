@@ -25,16 +25,18 @@ type Service struct {
 	events   events.Publisher
 	relay    events.Relay
 	screener Screener
+	policy   Policy
 }
 
 // relay is the outbox drain. It is a dependency rather than a goroutine so a scan's
 // reactions finish before the response goes out, and a failure never costs a movement.
 // screener is the list a barrier consults before it opens; nil means the site does not
-// screen at all, which is how the gate keeps working with the module switched off.
+// screen at all, which is how the gate keeps working with the module switched off. policy is
+// the tenant's own rulebook, and nil is the same promise for the module that owns it.
 func NewService(pool *sqlx.DB, repo *Repository, passRepo *passes.Repository, chain audit.Writer,
-	bus events.Publisher, relay events.Relay, screener Screener) *Service {
+	bus events.Publisher, relay events.Relay, screener Screener, policy Policy) *Service {
 	return &Service{pool: pool, repo: repo, passes: passRepo, chain: chain, events: bus,
-		relay: relay, screener: screener}
+		relay: relay, screener: screener, policy: policy}
 }
 
 // Scan is the whole gate decision: window, status and gate category are checked here, the
@@ -51,13 +53,9 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 		return Outcome{}, err
 	}
 
-	refused, verdict := s.refuse(ctx, scope, pass, scan)
-	result := ResultGranted
-	if refused != "" {
-		result = ResultDenied
-	}
+	call := s.decide(ctx, scope, pass, scan)
 
-	movement, replayed, err := s.record(ctx, scope, pass, scan, result, refused)
+	movement, replayed, err := s.record(ctx, scope, pass, scan, call.result, call.reason)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -69,31 +67,49 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 			PassNo: pass.PassNo, Status: pass.Status,
 		}, nil
 	}
-	s.note(ctx, scope, pass, verdict, movement, result, refused)
+	s.note(ctx, scope, pass, call, movement)
 	s.drain(ctx, scope)
 	return Outcome{
-		Movement: movement, Result: result, Reason: refused,
+		Movement: movement, Result: call.result, Reason: call.reason,
 		PassNo: pass.PassNo, Status: pass.Status,
 	}, nil
 }
 
-// note hands the screening answer back to whoever gave it, once the movement it decided is
-// on file. The guard already has his colour, so a list that fails to write its own record is
-// logged and left alone: it never turns a green light into an error page.
+// judgement is the gate's answer before any of it is written down: one colour, one line, and
+// the two outside answers that have to be handed back once the movement exists. query is the
+// question the rulebook was given, kept so its own log describes the scan that was decided
+// rather than a second reading of the pass row after the fact.
+type judgement struct {
+	result Result
+	reason string
+	screen Verdict
+	policy Decision
+	query  PolicyQuery
+}
+
+// note hands both outside answers back to whoever gave them, once the movement they decided
+// is on file. The guard already has his colour, so a list or a rulebook that fails to keep
+// its own record is logged and left alone: it never turns a green light into an error page.
 func (s *Service) note(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
-	verdict Verdict, movement Movement, result Result, reason string) {
-	if s.screener == nil || len(verdict.Matches) == 0 {
-		return
-	}
-	if err := s.screener.Note(ctx, verdict, HitRef{
+	call judgement, movement Movement) {
+	ref := HitRef{
 		MovementID: movement.ID, TenantID: scope.TenantID, SiteID: pass.SiteID,
 		GateID: scope.GateID, GateSessionID: scope.GateShiftID, ActorUserID: scope.UserID,
 		PassID: pass.ID, PassNo: pass.PassNo,
 		SubjectName: firstOf(derefString(movement.SubjectName), pass.SubjectName),
-		Result:      result, Reason: reason,
-	}); err != nil {
-		logging.From(ctx).ErrorContext(ctx, "screening record", "movement_id", movement.ID,
-			"error", err)
+		Result:      call.result, Reason: call.reason,
+	}
+	if s.screener != nil && len(call.screen.Matches) > 0 {
+		if err := s.screener.Note(ctx, call.screen, ref); err != nil {
+			logging.From(ctx).ErrorContext(ctx, "screening record", "movement_id", movement.ID,
+				"error", err)
+		}
+	}
+	if s.policy != nil && len(call.policy.Fired) > 0 {
+		if err := s.policy.Note(ctx, call.query, call.policy, ref); err != nil {
+			logging.From(ctx).ErrorContext(ctx, "rule evaluation log", "movement_id", movement.ID,
+				"error", err)
+		}
 	}
 }
 
@@ -127,26 +143,72 @@ func (s *Service) loadPass(ctx context.Context, scope tenancy.Scope, scan Scan) 
 	}
 }
 
-// refuse returns empty when the gate should open, and the screening verdict that came with
-// the answer. The status stays on the response so the guard screen can show what the pass
-// actually is.
+// decide returns the gate's judgement. Three sources answer in a fixed order, and the first
+// one that refuses ends the walk: Core's own facts about the pass row, then the tenant's
+// rulebook, then the screening list.
 //
-// The list is asked last on purpose: a pass outside its window or already on site is refused
-// by facts Core holds on its own row, and a gate that is busy should not spend a query on a
-// screening answer nobody needed.
-func (s *Service) refuse(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
-	scan Scan) (string, Verdict) {
+// The list is last because it is the most expensive question and the most specific: a pass
+// outside its window or already on site is refused by facts Core holds on its own row, and a
+// gate that is busy should not spend a query on a screening answer nobody needed. The
+// rulebook comes before it on purpose too - a refusal a time rule already gave is not a hit
+// the list should file and raise an alarm about, and a rule cannot waive a ban: the list is
+// the one answer that is never asked twice, so it is always the last word.
+func (s *Service) decide(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	scan Scan) judgement {
+	call := judgement{result: ResultGranted}
 	if reason := s.ruleRefusal(ctx, scope, pass, scan); reason != "" {
-		return reason, Verdict{}
+		call.result, call.reason = ResultDenied, reason
+		return call
 	}
+
+	call.policy, call.query = s.rulesFor(ctx, scope, pass, scan)
+	switch call.policy.Result {
+	case ResultDenied:
+		call.result, call.reason = ResultDenied, deny(call.policy.Reason)
+		return call
+	case ResultWarned:
+		call.result, call.reason = ResultWarned, "warned: "+call.policy.Reason
+	case ResultOverride:
+		call.result, call.reason = ResultOverride, "overridden: "+call.policy.Reason
+	}
+
+	reason, verdict := s.screening(ctx, scope, pass, scan)
+	call.screen = verdict
+	if reason != "" {
+		call.result, call.reason = ResultDenied, reason
+	}
+	return call
+}
+
+// rulesFor asks the tenant's rulebook, and gives back the question it was asked so the
+// module's own log describes the scan that was decided.
+//
+// An error is not "no rules matched". A rulebook that could not be read shuts the gate with
+// the sentence that says so, for the same reason a list that could not be read does: the
+// guard can act on "the rules could not be read" and cannot act on "nothing applies".
+func (s *Service) rulesFor(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	scan Scan) (Decision, PolicyQuery) {
+	if s.policy == nil {
+		return Decision{}, PolicyQuery{}
+	}
+	query := policyQueryOf(scope, pass, scan, time.Now().UTC())
+	decision, err := s.policy.Decide(ctx, query)
+	if err != nil {
+		logging.From(ctx).ErrorContext(ctx, "rules", "pass_no", pass.PassNo, "error", err)
+		return Decision{Result: ResultDenied, Reason: "the rules could not be read"}, query
+	}
+	return decision, query
+}
+
+// screening is the list question the barrier cannot answer for itself. The reason comes back
+// prefixed, and the verdict travels with it so the list can file its own record of the hit.
+func (s *Service) screening(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	scan Scan) (string, Verdict) {
 	if s.screener == nil {
 		return "", Verdict{}
 	}
 	verdict, err := s.screener.Screen(ctx, queryOf(scope, pass, scan))
 	if err != nil {
-		// A list that could not be read is not a list with nothing on it. The gate stays shut
-		// and says which of the two the guard is looking at, because "the screening service
-		// is down" is a sentence he can act on and "not on the list" is not.
 		logging.From(ctx).ErrorContext(ctx, "screening", "pass_no", pass.PassNo, "error", err)
 		return deny("the screening list could not be read"), Verdict{}
 	}
@@ -234,7 +296,7 @@ func (s *Service) record(ctx context.Context, scope tenancy.Scope, pass passes.P
 			SubjectName: firstOf(scan.SubjectName, pass.SubjectName), Plate: scan.Plate,
 			IdempotencyKey: idempotency,
 		}
-		if result == ResultGranted && scan.Direction == DirectionOut {
+		if result.Opens() && scan.Direction == DirectionOut {
 			if pass.EntryCount > 0 {
 				entry, err := repo.OpenEntry(ctx, scope.TenantID, pass.ID)
 				if err != nil {
@@ -265,7 +327,7 @@ func (s *Service) record(ctx context.Context, scope tenancy.Scope, pass passes.P
 		}
 		movement = written
 
-		if result == ResultGranted && scan.Direction == DirectionIn {
+		if result.Opens() && scan.Direction == DirectionIn {
 			if err := passesRepo.RecordEntry(ctx, scope.TenantID, pass.ID); err != nil {
 				return err
 			}
@@ -296,7 +358,8 @@ func (s *Service) record(ctx context.Context, scope tenancy.Scope, pass passes.P
 			DedupeKey: idempotency,
 			Payload: map[string]any{
 				"direction": string(scan.Direction), "result": string(result),
-				"pass_no": pass.PassNo, "category": pass.CategoryKey, "reason": reason,
+				"opened": result.Opens(), "pass_no": pass.PassNo,
+				"category": pass.CategoryKey, "reason": reason,
 			},
 		})
 	})

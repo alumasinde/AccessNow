@@ -15,6 +15,10 @@ type ScanRequest struct {
 	SubjectName    string     `json:"subject_name" validate:"omitempty,max=255"`
 	Plate          string     `json:"plate" validate:"omitempty,max=32"`
 	OccurredAt     *time.Time `json:"occurred_at"`
+	// Override asks for a rulebook refusal to be waived. The reason field is the sentence it
+	// has to carry, and the permission check happens in the rules module, which is the only
+	// place that knows both the rule and who is allowed to overrule it.
+	Override bool `json:"override"`
 }
 
 func (req ScanRequest) toScan() Scan {
@@ -25,7 +29,7 @@ func (req ScanRequest) toScan() Scan {
 	return Scan{
 		PassID: req.PassID, PassNo: req.PassNo, Direction: Direction(req.Direction),
 		Source: Source(req.Source), Reason: req.Reason, IdempotencyKey: req.IdempotencyKey,
-		SubjectName: req.SubjectName, Plate: req.Plate, OccurredAt: at,
+		SubjectName: req.SubjectName, Plate: req.Plate, OccurredAt: at, Override: req.Override,
 	}
 }
 

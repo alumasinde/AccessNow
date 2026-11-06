@@ -16,21 +16,25 @@ import (
 // tell people about this one" a decision somebody can read.
 //
 // movement.recorded is deliberately absent: a gate scan is data, and every module that cares
-// about one already publishes its own event about it. approval.started, pass.issued and
-// approval.delegation_ended are absent because nothing has written their wording yet.
+// about one already publishes its own event about it. pass.issued and pass.completed are
+// absent because a draft is not news and every module says its own goodbye (visit.checked_out,
+// material.returned, outpass.returned), and approval.started and approval.delegation_ended
+// because nothing has written their wording yet.
 var subscribedKeys = []string{
 	// The workflow engine.
 	"approval.step.assigned", "approval.escalated", "approval.decided", "approval.rejected",
 	"approval.returned", "approval.cancelled", "approval.reset", "approval.delegated",
 	// The pass spine, whatever module filed it.
-	"pass.approved", "pass.rejected", "pass.cancelled", "pass.expired",
+	"pass.approved", "pass.rejected", "pass.cancelled", "pass.expired", "pass.pending_review",
 	// Visitors.
 	"visit.created", "approval.requested",
 	// The two ways a visit ends with nobody having come, both written by the sweep.
 	"visit.no_show", "visit.expired",
+	// The gate's own account of a visitor: arrived, left, or called off before either.
+	"visit.checked_in", "visit.checked_out", "visit.cancelled",
 	// Goods.
 	"material.approval_needed", "material.declared", "material.released", "material.received",
-	"material.returned",
+	"material.returned", "material.verified",
 	// The owed-back sweep and the desk's dispute of a count.
 	"material.overdue", "material.disputed",
 	// Staff step-outs.
@@ -42,6 +46,9 @@ var subscribedKeys = []string{
 	// The screening lists. A watchlist hit is the quiet alarm the guard is not shown, and a
 	// denied entry is the one the supervisor has to hear about before the visitor walks off.
 	"blocklist.watched_hit", "blocklist.denied_entry",
+	// The rulebook. A rule that refused or flagged a scan, and the waiver somebody signed
+	// over it - the second one is why the supervisor reads the first.
+	"rule.matched", "gate.override_used",
 }
 
 // maxAttempts is the retry budget one notice gets before it stops and shows its error. It is

@@ -42,6 +42,17 @@ func (e Event) Str(key string) string {
 	return ""
 }
 
+// Bool reads one flag out of the payload. It is for the facts a producer worked out and
+// does not want every handler to re-derive from a code word - whether a gate result let the
+// subject through is the example, because the four modules whose rows follow a scan must all
+// answer it the same way and none of them owns the result vocabulary.
+func (e Event) Bool(key string) bool {
+	if value, ok := e.Payload[key].(bool); ok {
+		return value
+	}
+	return false
+}
+
 type Bus struct{}
 
 func (Bus) Publish(ctx context.Context, c db.Conn, e Event) error {

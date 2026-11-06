@@ -17,7 +17,7 @@ import (
 // Each branch is keyed on the status the declaration is in, which makes the delivery
 // safe to run twice: a replayed row finds nothing left to do.
 func (s *Service) OnMovement(ctx context.Context, e events.Event) error {
-	if e.PassID == 0 || e.AggregateID == 0 || e.Str("result") != "granted" {
+	if e.PassID == 0 || e.AggregateID == 0 || !e.Bool("opened") {
 		return nil
 	}
 	material, err := s.repo.MaterialByPass(ctx, e.TenantID, e.PassID)

@@ -17,7 +17,7 @@ import (
 // is a NotFound, which means the event belongs to another module and this one stays out
 // of it.
 func (s *Service) OnMovement(ctx context.Context, e events.Event) error {
-	if e.PassID == 0 || e.AggregateID == 0 || e.Str("result") != "granted" {
+	if e.PassID == 0 || e.AggregateID == 0 || !e.Bool("opened") {
 		return nil
 	}
 	visit, err := s.repo.VisitByPass(ctx, e.TenantID, e.PassID)

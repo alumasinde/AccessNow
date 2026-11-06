@@ -17,7 +17,7 @@ import (
 // Every branch is a compare-and-set on the status this read found, which is what makes an
 // at-least-once delivery safe: a replayed scan moves nothing and publishes nothing.
 func (s *Service) OnMovement(ctx context.Context, e events.Event) error {
-	if e.PassID == 0 || e.AggregateID == 0 || e.Str("result") != "granted" {
+	if e.PassID == 0 || e.AggregateID == 0 || !e.Bool("opened") {
 		return nil
 	}
 	filed, err := s.repo.ByPass(ctx, e.TenantID, e.PassID)

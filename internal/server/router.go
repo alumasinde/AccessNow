@@ -20,6 +20,7 @@ import (
 	"accessnow/internal/modules/blocklist"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
+	"accessnow/internal/modules/rules"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
@@ -63,6 +64,7 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 		staff.Register(r, deps.Staff, deps.Guard)
 		approval.Register(r, deps.Approval, deps.Guard)
 		blocklist.Register(r, deps.Blocklist, deps.Guard)
+		rules.Register(r, deps.Rules, deps.Guard)
 		notifications.Register(r, deps.Notifications, deps.Guard)
 
 		r.Route("/gate", func(r chi.Router) {

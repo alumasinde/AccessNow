@@ -83,6 +83,13 @@ notifications - email and sms use the log provider, so a notice is written to th
         GET /api/v1/notifications is the supervisor's inbox; goods releases are routed to the
         requester, and an overdue step-out also mails duty@%s.example.
 
+rules - five starter restrictions, filed and switched on for tenant %d:
+        GET /api/v1/rules is the book, GET /api/v1/rules/evaluations is what the gate said.
+        purpose "board" is admitted at any hour, a visitor pass gets two entries a day, an
+        audit visit is booked through the office, the visitor gate closes at 22:00, and a
+        goods move is noted for the duty roster. A guard cannot waive one of these; the
+        supervisor and the site manager can.
+
 next:
   go run ./cmd/api
   curl -X POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
@@ -91,5 +98,5 @@ next:
 		s.slug, s.adminEmail, s.adminPassword,
 		s.slug, s.guardPassword, out.GateID, out.DeviceToken,
 		out.TenantID, s.slug, s.guardPassword, s.slug, s.guardPassword, s.slug,
-		s.slug, s.slug, s.slug, s.adminPassword)
+		s.slug, out.TenantID, s.slug, s.slug, s.adminPassword)
 }

@@ -16,6 +16,7 @@ import (
 	"accessnow/internal/modules/blocklist"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
+	"accessnow/internal/modules/rules"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
@@ -55,6 +56,7 @@ type Deps struct {
 	Staff     *staff.Handler
 	Approval  *approval.Handler
 	Blocklist *blocklist.Handler
+	Rules     *rules.Handler
 
 	Notifications *notifications.Handler
 }
@@ -85,9 +87,12 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// a barrier has to be built before the module that answers it exists, and a tenant
 	// without the module gets an empty verdict rather than an error.
 	screen := blocklist.NewGuard()
+	// The tenant's own rulebook plugs in the same way, as the second seam the barrier holds:
+	// a rulebook that is not there says nothing, and saying nothing is the gate it had before.
+	policy := rules.NewGuard()
 	passSvc := passes.NewService(pool, passRepo, numbers, chain, bus, flow)
 	movementsSvc := movements.NewService(pool, movements.NewRepository(pool), passRepo, chain,
-		bus, relay, screen)
+		bus, relay, screen, policy)
 	visitorSvc := visitor.NewService(pool, visitor.NewRepository(pool), authRepo,
 		passSvc, passRepo, movementsSvc, bus)
 	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo,
@@ -99,6 +104,8 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	blocklistSvc := blocklist.NewService(pool, blocklist.NewRepository(pool), accessSvc, bus,
 		chain)
 	screen.Bind(blocklistSvc)
+	rulesSvc := rules.NewService(pool, rules.NewRepository(pool), accessSvc, bus, chain)
+	policy.Bind(rulesSvc)
 	// The notification provider's credentials come from the environment by name, so nothing
 	// in this wiring ever holds a secret it could log.
 	notificationsSvc := notifications.NewService(pool, notifications.NewRepository(pool),
@@ -152,6 +159,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Staff:     staff.NewHandler(staffSvc),
 		Approval:  approval.NewHandler(approvalSvc),
 		Blocklist: blocklist.NewHandler(blocklistSvc),
+		Rules:     rules.NewHandler(rulesSvc),
 
 		Notifications: notifications.NewHandler(notificationsSvc),
 	}
