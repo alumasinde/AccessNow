@@ -16,15 +16,24 @@ import (
 )
 
 type Service struct {
-	pool    *sqlx.DB
-	repo    *Repository
-	numbers *numbering.Allocator
-	chain   audit.Writer
-	events  events.Publisher
+	pool     *sqlx.DB
+	repo     *Repository
+	numbers  *numbering.Allocator
+	chain    audit.Writer
+	events   events.Publisher
+	workflow Workflow
 }
 
-func NewService(pool *sqlx.DB, repo *Repository, numbers *numbering.Allocator, chain audit.Writer, bus events.Publisher) *Service {
-	return &Service{pool: pool, repo: repo, numbers: numbers, chain: chain, events: bus}
+// Workflow is the seam an approval chain plugs into. Core asks whether a pass is already
+// being decided by a queue of approvers before it lets one click approve it; internal/server
+// hands over the implementation, which is how core stays ignorant of the module.
+type Workflow interface {
+	Holds(ctx context.Context, tenantID, passID int64) (bool, error)
+}
+
+func NewService(pool *sqlx.DB, repo *Repository, numbers *numbering.Allocator, chain audit.Writer,
+	bus events.Publisher, workflow Workflow) *Service {
+	return &Service{pool: pool, repo: repo, numbers: numbers, chain: chain, events: bus, workflow: workflow}
 }
 
 type Issue struct {
@@ -58,6 +67,21 @@ func (s *Service) Issue(ctx context.Context, c db.Conn, in Issue) (Pass, error) 
 	}); err != nil {
 		return Pass{}, err
 	}
+	// The chain starts here rather than in a module: the pass is the thing being approved,
+	// and every module that issues one - visitor, goods, vehicle, staff - then gets the
+	// tenant's workflow for free without any of them knowing the approval module exists.
+	if err := s.events.Publish(ctx, c, events.Event{
+		TenantID: in.TenantID, EventKey: "pass.issued",
+		AggregateType: "pass", AggregateID: id, PassID: id, SiteID: in.SiteID,
+		ActorUserID: in.ActorUserID,
+		Payload: map[string]any{
+			"pass_no": passNo, "pass_type_id": in.PassTypeID, "category_key": in.CategoryKey,
+			"module_key": in.SourceModuleKey, "value_amount": in.ValueAmount,
+			"requester_user_id": in.RequesterUserID,
+		},
+	}); err != nil {
+		return Pass{}, err
+	}
 	return repo.ByID(ctx, in.TenantID, id)
 }
 
@@ -86,6 +110,18 @@ func (s *Service) Decide(ctx context.Context, scope tenancy.Scope, passID int64,
 	}
 	if !current.Decidable() {
 		return Pass{}, errs.Conflict("pass " + current.PassNo + " is " + current.Status)
+	}
+	// Only an approval is guarded: refusing, cancelling and closing stay open to the desk,
+	// or a chain that nobody answers would strand the pass in both directions.
+	if to == StatusApproved && s.workflow != nil {
+		held, err := s.workflow.Holds(ctx, scope.TenantID, passID)
+		if err != nil {
+			return Pass{}, err
+		}
+		if held {
+			return Pass{}, errs.Conflict("pass " + current.PassNo +
+				" is in an approval chain; decide it in the approval queue")
+		}
 	}
 
 	from := Status(current.Status)

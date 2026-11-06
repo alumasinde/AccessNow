@@ -75,20 +75,22 @@ func (r *Repository) TypeByID(ctx context.Context, id int64) (PassType, error) {
 
 const passColumns = `id, uuid, tenant_id, site_id, pass_type_id, category_key, source_module_key,
 	pass_no, status, origin, subject_name, subject_phone, subject_email, purpose,
-	requester_user_id, host_user_id, valid_from, valid_until, entry_count,
-	issued_at, decided_at, decision_note, closed_at, created_at`
+	requester_user_id, host_user_id, department_id, valid_from, valid_until, value_amount,
+	value_currency, entry_count, issued_at, decided_at, decision_note, closed_at, created_at`
 
 func (r *Repository) Create(ctx context.Context, in New, createdBy int64) (int64, error) {
 	const query = `
 		INSERT INTO passes
 			(uuid, tenant_id, site_id, pass_type_id, category_key, source_module_key, pass_no,
 			 status, origin, subject_name, subject_phone, subject_email, purpose,
-			 requester_user_id, host_user_id, valid_from, valid_until, created_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			 requester_user_id, host_user_id, department_id, valid_from, valid_until,
+			 value_amount, value_currency, created_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := r.q.ExecContext(ctx, query,
 		uuid.NewString(), in.TenantID, in.SiteID, in.PassTypeID, in.CategoryKey, in.SourceModuleKey,
 		in.PassNo, string(in.Status), in.Origin, in.SubjectName, in.SubjectPhone, in.SubjectEmail,
-		in.Purpose, in.RequesterUserID, in.HostUserID, in.ValidFrom.UTC(), nullableTime(in.ValidUntil),
+		in.Purpose, in.RequesterUserID, in.HostUserID, in.DepartmentID, in.ValidFrom.UTC(),
+		nullableTime(in.ValidUntil), in.ValueAmount, blankToNil(in.ValueCurrency),
 		nullableInt64(createdBy))
 	if err != nil {
 		return 0, fmt.Errorf("create pass: %w", err)
@@ -247,6 +249,15 @@ func nullableTime(value *time.Time) any {
 
 func nullableInt64(value int64) any {
 	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+// blankToNil keeps an unset three-letter code out of a nullable column: "" is not a
+// currency an auditor can read off a badge, NULL is honest about there not being one.
+func blankToNil(value string) any {
+	if value == "" {
 		return nil
 	}
 	return value

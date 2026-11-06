@@ -97,7 +97,8 @@ func (s *Service) Create(ctx context.Context, scope tenancy.Scope, in Create) (V
 				Status: passStatus, Origin: origin, SubjectName: person.Name(),
 				SubjectPhone: person.Phone, SubjectEmail: person.Email, Purpose: text(in.Purpose),
 				RequesterUserID: num(scope.UserID), HostUserID: host.ID,
-				ValidFrom: now, ValidUntil: until,
+				DepartmentID: num(in.DepartmentID),
+				ValidFrom:    now, ValidUntil: until,
 			},
 			FormatKey: numberFormat, Timezone: scope.Timezone, ActorUserID: scope.UserID,
 		})

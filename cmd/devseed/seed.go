@@ -14,12 +14,14 @@ import (
 )
 
 type outcome struct {
-	TenantID    int64
-	SiteID      int64
-	GateID      int64
-	AdminID     int64
-	GuardID     int64
-	DeviceToken string
+	TenantID     int64
+	SiteID       int64
+	GateID       int64
+	AdminID      int64
+	GuardID      int64
+	SupervisorID int64
+	ManagerID    int64
+	DeviceToken  string
 }
 
 // provision writes in one transaction, so a half-seeded tenant never reaches the login
@@ -63,6 +65,14 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 		if err != nil {
 			return err
 		}
+		supervisorRole, err := roleID(ctx, c, tenant, "gate_supervisor")
+		if err != nil {
+			return err
+		}
+		managerRole, err := roleID(ctx, c, tenant, "site_manager")
+		if err != nil {
+			return err
+		}
 
 		if out.AdminID, err = ensureUser(ctx, c, tenant, "System", "Admin", s.adminEmail,
 			s.slug+"-admin", "Tenant administrator", adminHash, adminRole); err != nil {
@@ -70,6 +80,17 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 		}
 		if out.GuardID, err = ensureUser(ctx, c, tenant, "Gate", "Guard", "",
 			s.slug+"-guard", "Gate guard", guardHash, guardRole); err != nil {
+			return err
+		}
+		// The two logins an approval chain needs: a supervisor who answers the queue, and a
+		// site manager who signs the second step of the expensive ones. They share the
+		// guard's password because a seeded tenant has no secrets in it.
+		if out.SupervisorID, err = ensureUser(ctx, c, tenant, "Grace", "Njeri", "",
+			s.slug+"-supervisor", "Gate supervisor", guardHash, supervisorRole); err != nil {
+			return err
+		}
+		if out.ManagerID, err = ensureUser(ctx, c, tenant, "Samuel", "Otieno", "",
+			s.slug+"-manager", "Site manager", guardHash, managerRole); err != nil {
 			return err
 		}
 
@@ -83,6 +104,15 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 			return err
 		}
 		if err := enrollDevice(ctx, c, tenant, out.SiteID, out.GateID, s.slug, token); err != nil {
+			return err
+		}
+		// The directory comes last because it points at both the site and the login.
+		if err := ensureStaff(ctx, c, tenant, out.SiteID, out.AdminID, s.slug); err != nil {
+			return err
+		}
+		// Approval rules come after the people, because every step in one names a role that
+		// has to exist and a user who has to hold it.
+		if err := ensureFlows(ctx, c, tenant, out.SiteID, out.AdminID, out.SupervisorID); err != nil {
 			return err
 		}
 
@@ -170,11 +200,18 @@ func ensureUser(ctx context.Context, c db.Conn, tenantID int64, first, last, ema
 	return userID, wrap(err, "grant role")
 }
 
+// The working window is seeded because the after-hours flow reads it: a site that never
+// declared an opening time is a site that is always open, and its out-of-hours rule would
+// then match nothing.
 func ensureSite(ctx context.Context, c db.Conn, tenantID int64, tenantName string) (int64, error) {
 	return insert(ctx, c, "site", `
-		INSERT INTO sites (tenant_id, code, name, timezone, is_headquarters, status)
-		VALUES (?, 'HQ', ?, 'Africa/Nairobi', 1, 'active')
-		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`, tenantID, tenantName+" headquarters")
+		INSERT INTO sites (tenant_id, code, name, timezone, is_headquarters, status, settings)
+		VALUES (?, 'HQ', ?, 'Africa/Nairobi', 1, 'active',
+		        JSON_OBJECT('business_hours', JSON_OBJECT('days', 'mon-fri',
+		                                                  'open', '08:00', 'close', '18:00')))
+		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id),
+		                        settings = COALESCE(settings, VALUES(settings))`,
+		tenantID, tenantName+" headquarters")
 }
 
 func ensureGate(ctx context.Context, c db.Conn, tenantID, siteID int64) (int64, error) {
@@ -203,6 +240,29 @@ func enrollDevice(ctx context.Context, c db.Conn, tenantID, siteID, gateID int64
 		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), device_token_hash = VALUES(device_token_hash)`,
 		tenantID, siteID, gateID, security.HashToken(token), slug+"-TAB1", slug+" gate tablet")
 	return wrap(err, "enroll gate device")
+}
+
+// Two directory rows, because the outpass desk has two callers: an employee with a login,
+// who can ask for themselves, and one without, whom a guard signs out by name.
+func ensureStaff(ctx context.Context, c db.Conn, tenantID, siteID, userID int64, slug string) error {
+	const query = `
+		INSERT INTO staff (tenant_id, user_id, home_site_id, employee_no, first_name, last_name,
+		                   job_title, shift_pattern, status, started_on)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'day', 'active', CURRENT_DATE - INTERVAL 1 YEAR)
+		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`
+	for _, employee := range []struct {
+		user                   any
+		no, first, last, title string
+	}{
+		{userID, slug + "-E001", "Wanjiru", "Kamau", "Accounts clerk"},
+		{nil, slug + "-E002", "Peter", "Otieno", "Storekeeper"},
+	} {
+		if _, err := c.ExecContext(ctx, query, tenantID, employee.user, siteID, employee.no,
+			employee.first, employee.last, employee.title); err != nil {
+			return wrap(err, "seed staff "+employee.no)
+		}
+	}
+	return nil
 }
 
 func insert(ctx context.Context, c db.Conn, what, query string, args ...any) (int64, error) {

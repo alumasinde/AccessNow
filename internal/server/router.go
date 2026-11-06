@@ -16,7 +16,9 @@ import (
 	"accessnow/internal/core/gates"
 	"accessnow/internal/core/movements"
 	"accessnow/internal/core/passes"
+	"accessnow/internal/modules/approval"
 	"accessnow/internal/modules/material"
+	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
 	"accessnow/internal/platform/config"
@@ -56,6 +58,8 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 		visitor.Register(r, deps.Visitor, deps.Guard)
 		material.Register(r, deps.Material, deps.Guard)
 		vehicle.Register(r, deps.Vehicle, deps.Guard)
+		staff.Register(r, deps.Staff, deps.Guard)
+		approval.Register(r, deps.Approval, deps.Guard)
 
 		r.Route("/gate", func(r chi.Router) {
 			r.Use(httprate.LimitBy(cfg.ScanRate, time.Minute, httprate.KeyByIP))
@@ -88,7 +92,11 @@ func requestLog(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			started := time.Now()
 			recorder := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-			next.ServeHTTP(recorder, r.WithContext(logging.With(r.Context(), logger)))
+			// The request's own facts, put where a service that never sees the
+			// http.Request can still audit them.
+			ctx := httpx.WithMeta(r.Context(), r, middleware.GetReqID(r.Context()))
+			ctx = logging.With(ctx, logger)
+			next.ServeHTTP(recorder, r.WithContext(ctx))
 
 			logger.InfoContext(r.Context(), "request",
 				slog.String("method", r.Method),

@@ -3,6 +3,7 @@ package material
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -124,6 +125,7 @@ func (s *Service) Declare(ctx context.Context, scope tenancy.Scope, in Declare) 
 	if in.VerificationRequired != nil {
 		verification = *in.VerificationRequired
 	}
+	value, currency := declaredValue(in.Items)
 
 	var material Material
 	err = db.Transact(ctx, s.pool, func(c db.Conn) error {
@@ -135,6 +137,7 @@ func (s *Service) Declare(ctx context.Context, scope tenancy.Scope, in Declare) 
 				Status: passStatus(status), Origin: origin, SubjectName: in.DeclaredByName,
 				SubjectPhone: blankToNil(in.CarrierPhone), Purpose: blankToNil(purpose(in)),
 				RequesterUserID: num(scope.UserID), ValidFrom: now, ValidUntil: until,
+				ValueAmount: value, ValueCurrency: currency,
 			},
 			FormatKey: numberFormat, Timezone: scope.Timezone, ActorUserID: scope.UserID,
 		})
@@ -286,6 +289,30 @@ func (s *Service) Return(ctx context.Context, scope tenancy.Scope, materialID in
 	// The desk is the only one who knows a partial return finished the job, so this is
 	// where a goods pass stops being a live document.
 	return updated, s.finish(ctx, scope, materialID)
+}
+
+// declaredValue is what the whole load is worth: every priced line counted at the quantity
+// the desk gave it. Nothing priced is a nil, not a zero - a flow that adds a security
+// manager above a threshold must not fire for goods nobody put a price on. The currency is
+// the first one declared, because one lorry invoiced in two currencies is two lorries.
+func declaredValue(items []NewItem) (*float64, string) {
+	total := 0.0
+	currency := ""
+	priced := false
+	for _, item := range items {
+		if item.UnitValue == nil {
+			continue
+		}
+		total += *item.UnitValue * item.Quantity
+		priced = true
+		if currency == "" {
+			currency = strings.ToUpper(strings.TrimSpace(item.Currency))
+		}
+	}
+	if !priced {
+		return nil, ""
+	}
+	return &total, currency
 }
 
 func num(value int64) *int64 {

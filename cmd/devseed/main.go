@@ -74,6 +74,11 @@ guard   username %s-guard  password %s   works gate %d
 device  token %s
         send it as X-Device-Token to /api/v1/gate/*; it is shown once, only here.
 
+approvals - three flows, one cover, all seeded for tenant %d:
+        username %s-supervisor  password %s  holds gate_supervisor, answers the queue
+        username %s-manager     password %s  holds site_manager, signs the expensive ones
+        the supervisor is covered by %s-admin for the next week.
+
 next:
   go run ./cmd/api
   curl -X POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
@@ -81,5 +86,6 @@ next:
 `, out.TenantID, s.name, s.slug, out.SiteID, out.GateID,
 		s.slug, s.adminEmail, s.adminPassword,
 		s.slug, s.guardPassword, out.GateID, out.DeviceToken,
+		out.TenantID, s.slug, s.guardPassword, s.slug, s.guardPassword, s.slug,
 		s.slug, s.slug, s.adminPassword)
 }

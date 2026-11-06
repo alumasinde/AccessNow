@@ -254,3 +254,46 @@ func TestOnMovementIgnoresEventsThatAreNotAGoodsRelease(t *testing.T) {
 		}
 	}
 }
+
+// declaredValue is the only thing that turns a basket of line items into the number a
+// tenant's "above this value, ask the security manager" rule can read, so the blank cases
+// matter as much as the sums: a pass with no priced line must stay unpriced rather than
+// arrive at the desk as worth zero.
+func TestDeclaredValue(t *testing.T) {
+	money := func(v float64) *float64 { return &v }
+
+	cases := []struct {
+		name      string
+		items     []NewItem
+		wantTotal *float64
+		wantCur   string
+	}{
+		{"no items at all", nil, nil, ""},
+		{"nothing priced", []NewItem{{ItemName: "Crate", Quantity: 3}}, nil, ""},
+		{"one priced line", []NewItem{{ItemName: "Rack", Quantity: 2, UnitValue: money(60000),
+			Currency: "kes"}}, money(120000), "KES"},
+		{"unpriced lines are left out of the sum",
+			[]NewItem{{ItemName: "Rack", Quantity: 1, UnitValue: money(5000), Currency: "KES"},
+				{ItemName: "Unknown spare", Quantity: 4}}, money(5000), "KES"},
+		{"the first currency wins when lines disagree",
+			[]NewItem{{ItemName: "Rack", Quantity: 1, UnitValue: money(5000), Currency: "KES"},
+				{ItemName: "Import", Quantity: 1, UnitValue: money(90), Currency: "USD"}},
+			money(5090), "KES"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			total, currency := declaredValue(tc.items)
+			switch {
+			case tc.wantTotal == nil && total != nil:
+				t.Errorf("total = %v, want no declared value", *total)
+			case tc.wantTotal != nil && total == nil:
+				t.Error("total = nil, want a declared value")
+			case tc.wantTotal != nil && *total != *tc.wantTotal:
+				t.Errorf("total = %v, want %v", *total, *tc.wantTotal)
+			}
+			if currency != tc.wantCur {
+				t.Errorf("currency = %q, want %q", currency, tc.wantCur)
+			}
+		})
+	}
+}

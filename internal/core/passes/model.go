@@ -7,26 +7,30 @@ import "time"
 type Status string
 
 const (
-	StatusDraft     Status = "draft"
-	StatusPending   Status = "pending"
-	StatusApproved  Status = "approved"
-	StatusRejected  Status = "rejected"
-	StatusCancelled Status = "cancelled"
-	StatusExpired   Status = "expired"
-	StatusActive    Status = "active"
-	StatusOnSite    Status = "on_site"
-	StatusCompleted Status = "completed"
-	StatusReturned  Status = "returned"
-	StatusOverdue   Status = "overdue"
-	StatusVoid      Status = "void"
+	StatusDraft   Status = "draft"
+	StatusPending Status = "pending"
+	// StatusPendingReview is the state an approval chain sends a pass back to when an
+	// approver returns it for correction: the requester still owns it, and it is not yet
+	// worth anything at a barrier.
+	StatusPendingReview Status = "pending_review"
+	StatusApproved      Status = "approved"
+	StatusRejected      Status = "rejected"
+	StatusCancelled     Status = "cancelled"
+	StatusExpired       Status = "expired"
+	StatusActive        Status = "active"
+	StatusOnSite        Status = "on_site"
+	StatusCompleted     Status = "completed"
+	StatusReturned      Status = "returned"
+	StatusOverdue       Status = "overdue"
+	StatusVoid          Status = "void"
 )
 
 // Allowed matches chk_passes_status. Kept here so a service can refuse a transition the
 // database would also refuse, with a message that says which state it came from.
 var Allowed = []Status{
-	StatusDraft, StatusPending, StatusApproved, StatusRejected, StatusCancelled,
-	StatusExpired, StatusActive, StatusOnSite, StatusCompleted, StatusReturned,
-	StatusOverdue, StatusVoid,
+	StatusDraft, StatusPending, StatusPendingReview, StatusApproved, StatusRejected,
+	StatusCancelled, StatusExpired, StatusActive, StatusOnSite, StatusCompleted,
+	StatusReturned, StatusOverdue, StatusVoid,
 }
 
 func Valid(status Status) bool {
@@ -55,8 +59,11 @@ type Pass struct {
 	Purpose         *string    `db:"purpose"`
 	RequesterUserID *int64     `db:"requester_user_id"`
 	HostUserID      *int64     `db:"host_user_id"`
+	DepartmentID    *int64     `db:"department_id"`
 	ValidFrom       time.Time  `db:"valid_from"`
 	ValidUntil      *time.Time `db:"valid_until"`
+	ValueAmount     *float64   `db:"value_amount"`
+	ValueCurrency   *string    `db:"value_currency"`
 	EntryCount      int        `db:"entry_count"`
 	IssuedAt        *time.Time `db:"issued_at"`
 	DecidedAt       *time.Time `db:"decided_at"`
@@ -106,6 +113,17 @@ type New struct {
 	Purpose         *string
 	RequesterUserID *int64
 	HostUserID      *int64
-	ValidFrom       time.Time
-	ValidUntil      *time.Time
+	// DepartmentID is the org unit the request belongs to. Approval routing can key a flow
+	// to a department, so a pass that does not say which one it is can only match a flow
+	// that does not care.
+	DepartmentID *int64
+	ValidFrom    time.Time
+	ValidUntil   *time.Time
+	// ValueAmount is what the subject is worth, as declared on the request: the value of
+	// goods leaving the site, in the tenant's own currency. An approval flow can add a step
+	// above a threshold, so a nil here means "nothing was declared", never "worth nothing".
+	ValueAmount *float64
+	// ValueCurrency is the three-letter code ValueAmount is counted in. A flow that says
+	// "above 500,000" means nothing if the pass does not say what its 500,000 is worth in.
+	ValueCurrency string
 }

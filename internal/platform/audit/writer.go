@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"accessnow/internal/platform/db"
+	"accessnow/internal/platform/httpx"
 )
 
 const stream = "audit"
@@ -47,6 +48,19 @@ func (Writer) Write(ctx context.Context, c db.Conn, e Entry) error {
 	}
 	if e.OccurredAt.IsZero() {
 		e.OccurredAt = time.Now().UTC()
+	}
+	// A caller that knows the machine it came from says so; everyone else gets what the
+	// request carried. A background job has no request, and its row keeps NULL columns
+	// rather than inventing an address nobody used.
+	meta := httpx.MetaFrom(ctx)
+	if e.IPAddress == "" {
+		e.IPAddress = meta.IPAddress
+	}
+	if e.UserAgent == "" {
+		e.UserAgent = meta.UserAgent
+	}
+	if e.RequestID == "" {
+		e.RequestID = meta.RequestID
 	}
 
 	prevSeq, prevHash, err := lockTail(ctx, c, e.TenantID)

@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS outpasses (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
 
 -- "Who is out right now and who has not come back"
+-- is_overdue is computed, not read from the status column: 'overdue' is what the escalation
+-- sweep stamps for the record, and an employee already past the return time they gave has to
+-- show on the roster red before anybody runs it.
 CREATE OR REPLACE VIEW v_staff_out_of_site AS
 SELECT  o.tenant_id,
         o.id AS outpass_id,
@@ -89,9 +92,13 @@ SELECT  o.tenant_id,
         s.employee_no,
         o.department_id,
         o.reason_key,
+        o.expected_duration_minutes,
+        o.return_scan_required,
         o.expected_return_at,
         o.exited_at,
         TIMESTAMPDIFF(MINUTE, o.exited_at, UTC_TIMESTAMP()) AS minutes_out,
+        o.expected_return_at IS NOT NULL
+            AND o.expected_return_at <= UTC_TIMESTAMP() AS is_overdue,
         o.status
 FROM    outpasses o
 JOIN    passes p              ON p.id = o.pass_id

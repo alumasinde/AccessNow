@@ -40,9 +40,14 @@ func run() error {
 	}
 	defer pool.Close()
 
+	deps := server.Build(pool, cfg)
+	// A gate scan relays its own events inside the request. A desk write has no scan coming,
+	// so this loop is what delivers its events.
+	go deps.Backlog.Run(ctx)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           server.New(pool, server.Build(pool, cfg), cfg, logger),
+		Handler:           server.New(pool, deps, cfg, logger),
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
 		ReadHeaderTimeout: 5 * time.Second,

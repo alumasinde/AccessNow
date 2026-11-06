@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -106,6 +107,30 @@ func (d *Dispatcher) Relay(ctx context.Context, tenantID int64) error {
 		return fmt.Errorf("%d of %d reactions failed: %s", len(failed), len(pending), strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// Drain relays every tenant that owes work. A request only relays its own tenant, and only
+// on the paths that ask for it — the gate scan does, a desk write does not — so without this
+// a decision taken at the desk would wait for the next badge to be scanned before anything
+// reacted to it.
+func (d *Dispatcher) Drain(ctx context.Context) error {
+	if len(d.reg.keys()) == 0 {
+		return nil
+	}
+	const query = `SELECT DISTINCT tenant_id FROM domain_events WHERE status = 'pending'`
+	var tenants []int64
+	if err := d.pool.SelectContext(ctx, &tenants, query); err != nil {
+		return fmt.Errorf("read tenants owing events: %w", err)
+	}
+
+	var errs []error
+	for _, tenantID := range tenants {
+		if err := d.Relay(ctx, tenantID); err != nil {
+			// One tenant's broken handler must not stop the next tenant from being served.
+			errs = append(errs, fmt.Errorf("tenant %d: %w", tenantID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (d *Dispatcher) run(ctx context.Context, e Event) error {
