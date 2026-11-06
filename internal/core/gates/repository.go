@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -23,6 +24,9 @@ func (r *Repository) In(c db.Conn) *Repository { bound := *r; bound.q = c; retur
 const gateColumns = `g.id, g.tenant_id, g.site_id, g.code, g.name, g.gate_type, g.direction, g.status,
                      g.is_default, g.offline_capable, g.same_gate_exit_required,
                      g.requires_reason_on_override`
+
+const deviceColumns = `id, tenant_id, site_id, gate_id, label, is_shared, is_active,
+                       revoked_at, sync_status, cache_version, last_sync_at, last_seen_at`
 
 func (r *Repository) Assignable(ctx context.Context, tenantID, userID int64) ([]Gate, error) {
 	const query = `SELECT ` + gateColumns + `
@@ -138,8 +142,7 @@ func (r *Repository) CloseShift(ctx context.Context, shiftID int64, reason strin
 }
 
 func (r *Repository) DeviceByTokenHash(ctx context.Context, tokenHash string) (Device, error) {
-	const query = `
-		SELECT id, tenant_id, site_id, gate_id, label, is_shared, is_active, revoked_at
+	const query = `SELECT ` + deviceColumns + `
 		FROM   gate_devices
 		WHERE  device_token_hash = ?
 		LIMIT  1`
@@ -152,4 +155,38 @@ func (r *Repository) DeviceByTokenHash(ctx context.Context, tokenHash string) (D
 		return Device{}, fmt.Errorf("read device: %w", err)
 	}
 	return d, nil
+}
+
+// DeviceByID is the device a request already knows itself to be coming from. The gate surface
+// resolves a token into a scope, and the offline ledger needs the row behind that scope to
+// know which epoch it is stocking.
+func (r *Repository) DeviceByID(ctx context.Context, tenantID, id int64) (Device, error) {
+	const query = `SELECT ` + deviceColumns + ` FROM gate_devices
+		WHERE tenant_id = ? AND id = ?`
+	var d Device
+	err := r.q.GetContext(ctx, &d, query, tenantID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Device{}, errs.NotFound("device")
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("read device: %w", err)
+	}
+	return d, nil
+}
+
+// StampSync records what a device now holds and how this exchange went. The version only ever
+// moves forward: a device that asks twice for the same cache gets the same epoch back, and one
+// that somehow reports an older epoch must not drag a newer cache off the tablets at the gate.
+func (r *Repository) StampSync(ctx context.Context, tenantID, deviceID, cacheVersion int64,
+	status SyncStatus, at time.Time) error {
+	const query = `
+		UPDATE gate_devices
+		SET    sync_status = ?, last_sync_at = ?, last_seen_at = ?,
+		       cache_version = GREATEST(cache_version, ?)
+		WHERE  tenant_id = ? AND id = ?`
+	if _, err := r.q.ExecContext(ctx, query, string(status), at.UTC(), at.UTC(),
+		cacheVersion, tenantID, deviceID); err != nil {
+		return fmt.Errorf("stamp device sync: %w", err)
+	}
+	return nil
 }

@@ -36,11 +36,17 @@ Updated 2026-11-06 · 33 migration pairs · 30 Go packages · 8 module packages 
 - ✅ **10. Notifications** — `internal/modules/notifications` — events mapped to per-tenant
   routes and templates, in-app inbox, email over SMTP, SMS and WhatsApp over an HTTP gateway,
   five attempts with delivery status, background sweep loop. ⬜ push and webhook senders.
-- 🟡 **11. Offline Gate Mode** — `POST /api/v1/gate/sync` takes a batch of up to 200 locally
-  stored scans, needs an idempotency key per item, replays a duplicate back as the answer it
-  already gave, marks late arrivals, and the server keeps the status. ⬜ The device half:
-  `offline_cache_manifests`, `device_sync_batches` and `sync_conflicts` have no reader, so a
-  tablet has nothing to cache today's passes against.
+- ✅ **11. Offline Gate Mode** — `internal/modules/offline`. `GET /api/v1/gate/cache` stocks a
+  tablet with the passes it may honour and the listings it must refuse, sends only what changed
+  since the epoch the device names, and files the bundle in `offline_cache_manifests` so the
+  server can say what any device held at any version. `POST /api/v1/gate/sync` takes a batch of
+  up to 200 locally stored scans, needs an idempotency key per item, replays a duplicate back as
+  the answer it already gave, marks late arrivals, and the server keeps the status. The ledger
+  files one argument per movement under five types, tells the supervisor how many rows the
+  tablet handed in and how many are argued about, and the desk resolves them at
+  `/api/v1/offline/conflicts`. A gate with `offline_capable = 0` is refused a cache. ⬜ the
+  per-pass scan token stays NULL until QR issuing (item 6) exists, so a cached pass is honoured
+  by number alone.
 - ⬜ **5. Contractor and Recurring Access** — tables from `0014` only. A validity window and a
   pass type cover the recurring case for now; document expiry blocking a pass is not written.
 - ⬜ **6. QR and Hardware Scanning** — `pass_tokens` and `scan_attempts` exist, `HashToken`

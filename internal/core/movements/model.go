@@ -54,6 +54,14 @@ type Scan struct {
 	SubjectName    string
 	Plate          string
 	OccurredAt     time.Time
+	// BatchID is the server row of the offline batch this scan arrived in. Sync sets it; a
+	// device never sends it, because a tablet cannot claim to be inside a batch that does not
+	// exist on the server.
+	BatchID int64
+	// DeviceUUID is the tablet's own name for the movement it is reporting. It travels with
+	// the scan so a conflict about this row can be filed under something the device will
+	// repeat, rather than under a row only the server has ever seen.
+	DeviceUUID string
 	// Override asks a rulebook refusal to be waived. It is a scan field rather than a
 	// separate endpoint because the person asking is at the barrier with the pass in hand,
 	// and the answer has to be the colour of this scan.
@@ -90,6 +98,10 @@ type Outcome struct {
 	Reason   string
 	PassNo   string
 	Status   string
+	// Replayed is the answer to "was this scan already on file". Nothing in Core reads it; the
+	// ledger does, because a device that retried a half-sent batch did nothing wrong, and the
+	// row it is reporting is not a second passage through the gate.
+	Replayed bool
 }
 
 func (o Outcome) Green() bool { return o.Result.Opens() }

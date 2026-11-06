@@ -138,6 +138,11 @@ func Fill(e eventData, p PassContext, names nameSet) Vars {
 	v.setNumber("dwell_minutes", e.Num("dwell_minutes"))
 	v.setNumber("dwell_limit_minutes", e.Num("dwell_limit_minutes"))
 	v.setNumber("expected_minutes", e.Num("expected_duration_minutes"))
+	// The offline ledger counts a replayed queue in rows, not in people.
+	v.set("device_label", e.Str("device_label"))
+	v.set("client_batch_id", e.Str("client_batch_id"))
+	v.setNumber("record_count", e.Num("record_count"))
+	v.setNumber("conflict_count", e.Num("conflict_count"))
 	v.setMoney(p.ValueAmount, p.ValueCurrency)
 	v.setTime("valid_until", p.ValidUntil, e.ReaderZone)
 

@@ -124,6 +124,11 @@ func provision(ctx context.Context, pool *sqlx.DB, s settings) (outcome, error) 
 		if err := ensureRulebook(ctx, c, tenant, out.SiteID, out.AdminID); err != nil {
 			return err
 		}
+		// Offline gate mode is only a flag: the gate and the tablet it caches for are already
+		// filed above, and the ledger has nothing to hold until a device sends something.
+		if err := ensureOfflineGate(ctx, c, tenant); err != nil {
+			return err
+		}
 
 		return numbering.EnsureDefaults(ctx, c, tenant)
 	})

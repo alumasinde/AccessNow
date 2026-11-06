@@ -20,6 +20,7 @@ import (
 	"accessnow/internal/modules/blocklist"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
+	"accessnow/internal/modules/offline"
 	"accessnow/internal/modules/rules"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
@@ -65,11 +66,13 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 		approval.Register(r, deps.Approval, deps.Guard)
 		blocklist.Register(r, deps.Blocklist, deps.Guard)
 		rules.Register(r, deps.Rules, deps.Guard)
+		offline.Register(r, deps.Offline, deps.Guard)
 		notifications.Register(r, deps.Notifications, deps.Guard)
 
 		r.Route("/gate", func(r chi.Router) {
 			r.Use(httprate.LimitBy(cfg.ScanRate, time.Minute, httprate.KeyByIP))
 			movements.Register(r, deps.Movements, deps.Guard)
+			offline.RegisterGate(r, deps.Offline, deps.Guard)
 		})
 	})
 

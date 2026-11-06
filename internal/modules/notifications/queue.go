@@ -49,6 +49,9 @@ var subscribedKeys = []string{
 	// The rulebook. A rule that refused or flagged a scan, and the waiver somebody signed
 	// over it - the second one is why the supervisor reads the first.
 	"rule.matched", "gate.override_used",
+	// The offline ledger. A batch that came back with arguments on it is the one thing a
+	// supervisor has to do about a tablet that kept working without the server.
+	"sync.conflicts_found",
 }
 
 // maxAttempts is the retry budget one notice gets before it stops and shows its error. It is

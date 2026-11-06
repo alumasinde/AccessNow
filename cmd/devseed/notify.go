@@ -44,6 +44,10 @@ func starterRoutes(supervisorID int64, slug string) []starterRoute {
 			address: "duty@" + slug + ".example"},
 		{eventKey: "outpass.overdue", channel: "in_app", recipientType: "user",
 			userID: supervisorID},
+		// The offline ledger's argument queue goes to the same person who chases a step-out,
+		// because it is the same kind of job: rows a tablet decided about without the server.
+		{eventKey: "sync.conflicts_found", channel: "in_app", recipientType: "user",
+			userID: supervisorID},
 	}
 }
 

@@ -26,17 +26,21 @@ type Service struct {
 	relay    events.Relay
 	screener Screener
 	policy   Policy
+	ledger   Ledger
 }
 
 // relay is the outbox drain. It is a dependency rather than a goroutine so a scan's
 // reactions finish before the response goes out, and a failure never costs a movement.
 // screener is the list a barrier consults before it opens; nil means the site does not
 // screen at all, which is how the gate keeps working with the module switched off. policy is
-// the tenant's own rulebook, and nil is the same promise for the module that owns it.
+// the tenant's own rulebook, and nil is the same promise for the module that owns it. ledger
+// is the book kept of a replayed offline batch, and nil is that same promise a third time:
+// the queue still lands, nobody files it.
 func NewService(pool *sqlx.DB, repo *Repository, passRepo *passes.Repository, chain audit.Writer,
-	bus events.Publisher, relay events.Relay, screener Screener, policy Policy) *Service {
+	bus events.Publisher, relay events.Relay, screener Screener, policy Policy,
+	ledger Ledger) *Service {
 	return &Service{pool: pool, repo: repo, passes: passRepo, chain: chain, events: bus,
-		relay: relay, screener: screener, policy: policy}
+		relay: relay, screener: screener, policy: policy, ledger: ledger}
 }
 
 // Scan is the whole gate decision: window, status and gate category are checked here, the
@@ -64,7 +68,7 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 		// the pass has moved on since, and re-deciding would show a different colour.
 		return Outcome{
 			Movement: movement, Result: Result(movement.Result), Reason: movement.Reason,
-			PassNo: pass.PassNo, Status: pass.Status,
+			PassNo: pass.PassNo, Status: pass.Status, Replayed: true,
 		}, nil
 	}
 	s.note(ctx, scope, pass, call, movement)
@@ -294,7 +298,7 @@ func (s *Service) record(ctx context.Context, scope tenancy.Scope, pass passes.P
 			DeviceOccurredAt: scan.OccurredAt.UTC(), Reason: firstOf(scan.Reason, reason),
 			IsLateSync:  source == SourceOffline,
 			SubjectName: firstOf(scan.SubjectName, pass.SubjectName), Plate: scan.Plate,
-			IdempotencyKey: idempotency,
+			IdempotencyKey: idempotency, SyncBatchID: scan.BatchID,
 		}
 		if result.Opens() && scan.Direction == DirectionOut {
 			if pass.EntryCount > 0 {

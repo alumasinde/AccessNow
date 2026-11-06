@@ -77,15 +77,12 @@ func (h *Handler) Sync(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(r.Context(), w, r, err)
 		return
 	}
-	scans := make([]Scan, 0, len(req.Items))
-	for _, item := range req.Items {
-		scans = append(scans, item.toScan())
-	}
 
-	synced := h.svc.Sync(r.Context(), scope, scans)
-	views := make([]SyncedView, 0, len(synced))
-	for _, result := range synced {
-		view := SyncedView{Index: result.Index, MovementID: result.MovementID, Reason: result.Reason}
+	summary := h.svc.Sync(r.Context(), scope, req.toQueue())
+	views := make([]SyncedView, 0, len(summary.Items))
+	for _, result := range summary.Items {
+		view := SyncedView{Index: result.Index, MovementID: result.MovementID,
+			Reason: result.Reason, Duplicate: result.Duplicate}
 		if result.Result != "" {
 			view.Result = string(result.Result)
 		}
@@ -94,5 +91,7 @@ func (h *Handler) Sync(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, view)
 	}
-	httpx.OK(w, map[string]any{"items": views})
+	httpx.OK(w, map[string]any{
+		"batch_id": summary.BatchID, "status": summary.Status, "items": views,
+	})
 }

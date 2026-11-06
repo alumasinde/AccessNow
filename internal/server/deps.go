@@ -16,6 +16,7 @@ import (
 	"accessnow/internal/modules/blocklist"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
+	"accessnow/internal/modules/offline"
 	"accessnow/internal/modules/rules"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
@@ -57,6 +58,7 @@ type Deps struct {
 	Approval  *approval.Handler
 	Blocklist *blocklist.Handler
 	Rules     *rules.Handler
+	Offline   *offline.Handler
 
 	Notifications *notifications.Handler
 }
@@ -77,7 +79,8 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	numbers := numbering.NewAllocator(numbering.NewRepository(pool))
 
 	authSvc := auth.NewService(pool, authRepo, chain, cfg)
-	gateSvc := gates.NewService(pool, gates.NewRepository(pool), authRepo, accessSvc, chain)
+	gateRepo := gates.NewRepository(pool)
+	gateSvc := gates.NewService(pool, gateRepo, authRepo, accessSvc, chain)
 	passRepo := passes.NewRepository(pool)
 	// The workflow plugs into Core through an empty handle, because Core needs the guard to
 	// build and the guard needs Core's service to answer. Bind completes it below; nothing
@@ -90,9 +93,13 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// The tenant's own rulebook plugs in the same way, as the second seam the barrier holds:
 	// a rulebook that is not there says nothing, and saying nothing is the gate it had before.
 	policy := rules.NewGuard()
+	// The offline ledger plugs in the same way, and it is the seam with the least promise in it:
+	// a replayed queue that nobody files still lands, row for row, exactly as it did before this
+	// module existed.
+	ledger := movements.NewLedgerGuard()
 	passSvc := passes.NewService(pool, passRepo, numbers, chain, bus, flow)
 	movementsSvc := movements.NewService(pool, movements.NewRepository(pool), passRepo, chain,
-		bus, relay, screen, policy)
+		bus, relay, screen, policy, ledger)
 	visitorSvc := visitor.NewService(pool, visitor.NewRepository(pool), authRepo,
 		passSvc, passRepo, movementsSvc, bus)
 	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo,
@@ -106,6 +113,12 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	screen.Bind(blocklistSvc)
 	rulesSvc := rules.NewService(pool, rules.NewRepository(pool), accessSvc, bus, chain)
 	policy.Bind(rulesSvc)
+	// Offline gate mode is the ledger behind Core's seam, and the cache a device pulls. The
+	// screening list reaches it through the wiring rather than as a dependency: a tenant that
+	// runs gates offline without the list gets a cache with the passes in it.
+	offlineSvc := offline.NewService(pool, offline.NewRepository(pool), gateRepo, passRepo,
+		screeningCache{svc: blocklistSvc}, accessSvc, bus, chain)
+	ledger.Bind(offlineSvc)
 	// The notification provider's credentials come from the environment by name, so nothing
 	// in this wiring ever holds a secret it could log.
 	notificationsSvc := notifications.NewService(pool, notifications.NewRepository(pool),
@@ -160,6 +173,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Approval:  approval.NewHandler(approvalSvc),
 		Blocklist: blocklist.NewHandler(blocklistSvc),
 		Rules:     rules.NewHandler(rulesSvc),
+		Offline:   offline.NewHandler(offlineSvc),
 
 		Notifications: notifications.NewHandler(notificationsSvc),
 	}

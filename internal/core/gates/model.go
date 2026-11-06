@@ -34,6 +34,19 @@ type Shift struct {
 
 func (s Shift) Open() bool { return s.ClosedAt == nil }
 
+// SyncStatus is how the last exchange with a device ended, as the device row records it.
+type SyncStatus string
+
+const (
+	// SyncPending is where an enrolled device starts: it has never been given a cache.
+	SyncPending SyncStatus = "pending"
+	// SyncSynced is the ordinary answer: the device holds what the server just told it to.
+	SyncSynced SyncStatus = "synced"
+	// SyncFault means the last time this device talked, the server had a problem with what it
+	// said. It is a state a supervisor is meant to notice, not one a device reads.
+	SyncFault SyncStatus = "error"
+)
+
 type Device struct {
 	ID        int64      `db:"id"`
 	TenantID  int64      `db:"tenant_id"`
@@ -43,6 +56,14 @@ type Device struct {
 	IsShared  bool       `db:"is_shared"`
 	IsActive  bool       `db:"is_active"`
 	RevokedAt *time.Time `db:"revoked_at"`
+	// SyncStatus, CacheVersion and LastSyncAt are the device's side of offline gate mode: what
+	// it was last told to hold, which epoch of it it holds, and when it last said anything.
+	// They are read here rather than by the module because this row is Core's, and a device
+	// that has been told a stale cache is holding a pass it has no way of knowing it lost.
+	SyncStatus   SyncStatus `db:"sync_status"`
+	CacheVersion int64      `db:"cache_version"`
+	LastSyncAt   *time.Time `db:"last_sync_at"`
+	LastSeenAt   *time.Time `db:"last_seen_at"`
 }
 
 // Usable is the whole test for "this tablet may work this gate right now".
