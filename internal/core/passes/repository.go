@@ -30,12 +30,16 @@ type PassType struct {
 	RequiresHost         bool   `db:"requires_host"`
 	DefaultValidityHours *int   `db:"default_validity_hours"`
 	DefaultMaxEntries    *int   `db:"default_max_entries"`
+	// DefaultDwellLimitMinutes belongs to the catalogue because it is a tenant rule about
+	// a kind of pass, not a fact about one vehicle: the vehicle module snapshots it onto
+	// the pass so a later edit of the rule cannot rewrite history.
+	DefaultDwellLimitMinutes *int `db:"default_dwell_limit_minutes"`
 }
 
 func (r *Repository) TypeByKey(ctx context.Context, typeKey string) (PassType, error) {
 	const query = `
 		SELECT id, type_key, module_key, category_key, requires_approval, requires_host,
-		       default_validity_hours, default_max_entries
+		       default_validity_hours, default_max_entries, default_dwell_limit_minutes
 		FROM   pass_types
 		WHERE  type_key = ? AND status = 'active'`
 	var t PassType
@@ -45,6 +49,26 @@ func (r *Repository) TypeByKey(ctx context.Context, typeKey string) (PassType, e
 	}
 	if err != nil {
 		return PassType{}, fmt.Errorf("read pass type: %w", err)
+	}
+	return t, nil
+}
+
+// TypeByID reads the same catalogue row a pass already points at. A module that only has
+// the pass in hand - the gate reaction, for instance - still has to ask the pass type
+// whether another entry is allowed.
+func (r *Repository) TypeByID(ctx context.Context, id int64) (PassType, error) {
+	const query = `
+		SELECT id, type_key, module_key, category_key, requires_approval, requires_host,
+		       default_validity_hours, default_max_entries, default_dwell_limit_minutes
+		FROM   pass_types
+		WHERE  id = ?`
+	var t PassType
+	err := r.q.GetContext(ctx, &t, query, id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return PassType{}, errs.NotFound("pass type")
+	case err != nil:
+		return PassType{}, fmt.Errorf("read pass type %d: %w", id, err)
 	}
 	return t, nil
 }

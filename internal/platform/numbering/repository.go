@@ -37,22 +37,51 @@ func (r *Repository) ActiveFormat(ctx context.Context, tenantID int64, formatKey
 
 // Claim advances the counter and returns the number handed out.
 //
-// LAST_INSERT_ID() is scoped to the connection, so this has to run on a transaction
-// that stays pinned to one connection; it is also what makes the increment atomic
-// across two guards scanning at two gates at the same instant.
+// The read is a locked one and the lock is held until the caller's transaction commits,
+// which is what makes a number exclusive: two guards at two gates compute the same next
+// value only if they are allowed to read the same row at the same time, and this stops it.
+// It therefore has to run on the transaction that inserts the pass, so a rolled back issue
+// hands the number back instead of burning it - exactly what a gap_required format needs.
+//
+// The increment is read and written in two statements on purpose. The single-statement
+// trick (last_value = LAST_INSERT_ID(last_value + step), then SELECT LAST_INSERT_ID())
+// loses on the very first claim of a period, because that claim also inserts the row, and
+// an inserted AUTO_INCREMENT id overwrites the sequence value in the same session state:
+// the pass would be numbered with the counter row's own id.
 func (r *Repository) Claim(ctx context.Context, tenantID, formatID int64, periodKey string) (uint64, error) {
-	const claim = `
-		INSERT INTO pass_number_counters (tenant_id, format_id, period_key, last_value)
-		VALUES (?, ?, ?, LAST_INSERT_ID(1))
-		ON DUPLICATE KEY UPDATE last_value = LAST_INSERT_ID(last_value + step)`
-	if _, err := r.q.ExecContext(ctx, claim, tenantID, formatID, periodKey); err != nil {
+	// Opening a period is idempotent, so two claims that both find no row do not race: the
+	// second one is ignored and both then read and move the same locked row.
+	const open = `
+		INSERT IGNORE INTO pass_number_counters (tenant_id, format_id, period_key, last_value)
+		VALUES (?, ?, ?, 0)`
+	if _, err := r.q.ExecContext(ctx, open, tenantID, formatID, periodKey); err != nil {
+		return 0, fmt.Errorf("open pass number period: %w", err)
+	}
+
+	var next uint64
+	const lock = `
+		SELECT last_value + step FROM pass_number_counters
+		WHERE  tenant_id = ? AND format_id = ? AND period_key = ? FOR UPDATE`
+	if err := r.q.GetContext(ctx, &next, lock, tenantID, formatID, periodKey); err != nil {
 		return 0, fmt.Errorf("claim pass number: %w", err)
 	}
-	var value uint64
-	if err := r.q.GetContext(ctx, &value, `SELECT LAST_INSERT_ID()`); err != nil {
-		return 0, fmt.Errorf("read claimed pass number: %w", err)
+
+	const advance = `
+		UPDATE pass_number_counters SET last_value = ?
+		WHERE  tenant_id = ? AND format_id = ? AND period_key = ? AND last_value < ?`
+	result, err := r.q.ExecContext(ctx, advance, next, tenantID, formatID, periodKey, next)
+	if err != nil {
+		return 0, fmt.Errorf("advance pass number counter: %w", err)
 	}
-	return value, nil
+	// The row is locked, so nothing should have moved it under us. If it somehow did, the
+	// number this claim read is somebody else's already, and saying so is better than
+	// handing out a duplicate that dies on uk_passes_no.
+	if moved, err := db.RowsChanged(result); err != nil {
+		return 0, err
+	} else if !moved {
+		return 0, errs.Conflict("pass number counter moved while this request was in flight")
+	}
+	return next, nil
 }
 
 // SaveFormat creates or replaces a tenant format. Existing pass_no values are never

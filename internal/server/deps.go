@@ -13,6 +13,7 @@ import (
 	"accessnow/internal/core/movements"
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/material"
+	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
 	"accessnow/internal/platform/audit"
 	"accessnow/internal/platform/config"
@@ -35,6 +36,7 @@ type Deps struct {
 	Movements *movements.Handler
 	Visitor   *visitor.Handler
 	Material  *material.Handler
+	Vehicle   *vehicle.Handler
 }
 
 func Build(pool *sqlx.DB, cfg config.Config) *Deps {
@@ -60,13 +62,15 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	visitorSvc := visitor.NewService(pool, visitor.NewRepository(pool), authRepo,
 		passSvc, passRepo, movementsSvc, bus)
 	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo, bus)
+	vehicleSvc := vehicle.NewService(pool, vehicle.NewRepository(pool), passSvc, passRepo, bus)
 
-	// Both reactions key off the same scan: the gate decides, the module's own row follows.
-	// A module switched off for a tenant hides its surface, not these handlers: letting the
-	// register drift while the desk is closed is worse than keeping it true, and turning
-	// the module back on would otherwise resurrect passes stuck at "approved".
+	// All three reactions key off the same scan: the gate decides, the module's own row
+	// follows. A module switched off for a tenant hides its surface, not these handlers:
+	// letting the register drift while the desk is closed is worse than keeping it true, and
+	// turning the module back on would otherwise resurrect passes stuck at "approved".
 	registry.On("movement.recorded", visitorSvc.OnMovement)
 	registry.On("movement.recorded", materialSvc.OnMovement)
+	registry.On("movement.recorded", vehicleSvc.OnMovement)
 
 	guard := router.Guard{
 		Session:    auth.NewMiddleware(authSvc).Session,
@@ -84,5 +88,6 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Movements: movements.NewHandler(movementsSvc),
 		Visitor:   visitor.NewHandler(visitorSvc),
 		Material:  material.NewHandler(materialSvc),
+		Vehicle:   vehicle.NewHandler(vehicleSvc),
 	}
 }

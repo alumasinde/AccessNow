@@ -100,7 +100,9 @@ CREATE TABLE IF NOT EXISTS vehicle_passes (
     CONSTRAINT chk_vehicle_passes_flags CHECK (is_fleet_snapshot IN (0, 1) AND is_overstaying IN (0, 1))
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
 
--- The nightly job that flags overstays and the roll-call both read this.
+-- The roll-call reads this. The flag is computed, not read from the column: is_overstaying
+-- is what a scan or a sweep stamps for the record, and a vehicle already past the limit it
+-- was given has to show on the roster before anybody stamps it.
 CREATE OR REPLACE VIEW v_vehicles_on_site AS
 SELECT  vp.id,
         vp.tenant_id,
@@ -113,7 +115,9 @@ SELECT  vp.id,
         vp.purpose,
         vp.entered_at,
         vp.dwell_limit_minutes,
-        vp.is_overstaying,
+        IF(vp.dwell_limit_minutes IS NOT NULL
+           AND TIMESTAMPDIFF(MINUTE, vp.entered_at, UTC_TIMESTAMP()) >= vp.dwell_limit_minutes,
+           1, 0) AS is_overstaying,
         TIMESTAMPDIFF(MINUTE, vp.entered_at, UTC_TIMESTAMP()) AS current_dwell_minutes
 FROM    vehicle_passes vp
 JOIN    passes p              ON p.id = vp.pass_id

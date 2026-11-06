@@ -17,6 +17,7 @@ import (
 	"accessnow/internal/core/movements"
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/material"
+	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
 	"accessnow/internal/platform/config"
 	"accessnow/internal/platform/errs"
@@ -54,6 +55,7 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 		passes.Register(r, deps.Passes, deps.Guard)
 		visitor.Register(r, deps.Visitor, deps.Guard)
 		material.Register(r, deps.Material, deps.Guard)
+		vehicle.Register(r, deps.Vehicle, deps.Guard)
 
 		r.Route("/gate", func(r chi.Router) {
 			r.Use(httprate.LimitBy(cfg.ScanRate, time.Minute, httprate.KeyByIP))

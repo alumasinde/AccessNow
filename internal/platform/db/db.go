@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -82,8 +83,30 @@ func Transact(ctx context.Context, db *sqlx.DB, fn func(Conn) error) error {
 	return tx.Commit()
 }
 
+// IsDuplicate reports a unique-key violation. Every register in this system is protected by
+// a UNIQUE key rather than by a read-then-write in the service, so a caller that lost the
+// race gets a conflict naming the row, not a 500 with an error number in it.
+func IsDuplicate(err error) bool {
+	var myerr *mysql.MySQLError
+	if !errors.As(err, &myerr) {
+		return false
+	}
+	return myerr.Number == 1062
+}
+
 func DSN(c config.Database) string {
 	return mysqlConfig(c).FormatDSN()
+}
+
+// RowsChanged reports whether a compare-and-set update took the row. Zero rows means the
+// row had already moved, which is how a writer tells its own first attempt from a second
+// delivery of the same thing - and how an allocator notices a number it no longer owns.
+func RowsChanged(result sql.Result) (bool, error) {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read rows affected: %w", err)
+	}
+	return affected > 0, nil
 }
 
 func mysqlConfig(c config.Database) *mysql.Config {
