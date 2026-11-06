@@ -205,10 +205,11 @@ func (s *Service) Note(ctx context.Context, q movements.PolicyQuery, d movements
 			if err := repo.LogEvaluation(ctx, rowOf(q, d, ref, hit, evidence, now)); err != nil {
 				return err
 			}
-			if hit.Quota != nil && hit.Quota.Spent && d.Result.Opens() {
-				// A scan that ended in a refusal below this rule never happened for the
-				// purposes of its allowance: the person did not come in, so the count that
-				// let them in is not spent.
+			// A scan that ended in a refusal below this rule never happened for the purposes of
+			// its allowance: the person did not come in, so the count that would have let them
+			// in is not spent. A granted scan leaves Result empty, which is Core's own "the
+			// rulebook said nothing", so the refusal is what is tested for, not the green light.
+			if hit.Quota != nil && hit.Quota.Spent && d.Result != movements.ResultDenied {
 				if err := repo.Spend(ctx, *hit.Quota, q.TenantID, hit.Quota.Limit, now); err != nil {
 					return err
 				}

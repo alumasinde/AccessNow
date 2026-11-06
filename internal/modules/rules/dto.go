@@ -201,7 +201,7 @@ func ParseRules(r *http.Request) (ListFilter, httpx.Page, error) {
 	if stage != "" && !Stage(stage).Valid() {
 		return ListFilter{}, httpx.Page{}, errs.BadField("stage", stage+" is not a rule stage")
 	}
-	siteID, err := httpx.QueryID(r, "site_id")
+	siteID, err := queryID(r, "site_id")
 	if err != nil {
 		return ListFilter{}, httpx.Page{}, err
 	}
@@ -225,11 +225,11 @@ func ParseEvaluations(r *http.Request) (EvalFilter, httpx.Page, error) {
 		return EvalFilter{}, httpx.Page{}, errs.BadField("outcome",
 			"must be passed, warned, blocked, approval_required, limit_reached or override_granted")
 	}
-	ruleID, err := httpx.QueryID(r, "rule_id")
+	ruleID, err := queryID(r, "rule_id")
 	if err != nil {
 		return EvalFilter{}, httpx.Page{}, err
 	}
-	passID, err := httpx.QueryID(r, "pass_id")
+	passID, err := queryID(r, "pass_id")
 	if err != nil {
 		return EvalFilter{}, httpx.Page{}, err
 	}
@@ -255,6 +255,15 @@ func knownOutcome(outcome string) bool {
 	default:
 		return false
 	}
+}
+
+// queryID reads an optional filter. An absent ?site_id= is "every site", which is what a desk
+// asks for when it opens the book; only a value that is there and not a number is an error.
+func queryID(r *http.Request, name string) (int64, error) {
+	if strings.TrimSpace(r.URL.Query().Get(name)) == "" {
+		return 0, nil
+	}
+	return httpx.QueryID(r, name)
 }
 
 // flag reads a query flag that means something different when it is absent: include_retired
