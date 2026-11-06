@@ -13,6 +13,7 @@ import (
 	"accessnow/internal/core/movements"
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/approval"
+	"accessnow/internal/modules/blocklist"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
 	"accessnow/internal/modules/staff"
@@ -53,6 +54,7 @@ type Deps struct {
 	Vehicle   *vehicle.Handler
 	Staff     *staff.Handler
 	Approval  *approval.Handler
+	Blocklist *blocklist.Handler
 
 	Notifications *notifications.Handler
 }
@@ -79,15 +81,24 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// build and the guard needs Core's service to answer. Bind completes it below; nothing
 	// reaches the desk surface in between.
 	flow := approval.NewGuard()
+	// The screening list plugs into Core through the same empty handle, for the same reason:
+	// a barrier has to be built before the module that answers it exists, and a tenant
+	// without the module gets an empty verdict rather than an error.
+	screen := blocklist.NewGuard()
 	passSvc := passes.NewService(pool, passRepo, numbers, chain, bus, flow)
-	movementsSvc := movements.NewService(pool, movements.NewRepository(pool), passRepo, chain, bus, relay)
+	movementsSvc := movements.NewService(pool, movements.NewRepository(pool), passRepo, chain,
+		bus, relay, screen)
 	visitorSvc := visitor.NewService(pool, visitor.NewRepository(pool), authRepo,
 		passSvc, passRepo, movementsSvc, bus)
-	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo, bus)
+	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo,
+		bus, chain)
 	vehicleSvc := vehicle.NewService(pool, vehicle.NewRepository(pool), passSvc, passRepo, bus)
 	staffSvc := staff.NewService(pool, staff.NewRepository(pool), passSvc, passRepo, bus)
 	approvalSvc := approval.NewService(pool, approval.NewRepository(pool), passSvc, chain, bus, accessSvc)
 	flow.Bind(approvalSvc)
+	blocklistSvc := blocklist.NewService(pool, blocklist.NewRepository(pool), accessSvc, bus,
+		chain)
+	screen.Bind(blocklistSvc)
 	// The notification provider's credentials come from the environment by name, so nothing
 	// in this wiring ever holds a secret it could log.
 	notificationsSvc := notifications.NewService(pool, notifications.NewRepository(pool),
@@ -140,6 +151,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Vehicle:   vehicle.NewHandler(vehicleSvc),
 		Staff:     staff.NewHandler(staffSvc),
 		Approval:  approval.NewHandler(approvalSvc),
+		Blocklist: blocklist.NewHandler(blocklistSvc),
 
 		Notifications: notifications.NewHandler(notificationsSvc),
 	}

@@ -77,7 +77,7 @@ func (s *Service) Create(ctx context.Context, scope tenancy.Scope, in Create) (V
 	}
 	now := time.Now().UTC()
 	until := passes.Window(now, passType.DefaultValidityHours)
-	host, err := s.host(ctx, in.Visitor.HostUserID)
+	host, err := s.host(ctx, scope.TenantID, in.Visitor.HostUserID)
 	if err != nil {
 		return Visit{}, err
 	}

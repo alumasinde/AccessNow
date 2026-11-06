@@ -51,12 +51,15 @@ func TestValidStatusCoversTheCheckConstraint(t *testing.T) {
 }
 
 func TestVisitOpen(t *testing.T) {
-	for _, status := range []Status{StatusPending, StatusApproved, StatusOnSite, StatusExpired} {
+	for _, status := range []Status{StatusPending, StatusApproved, StatusOnSite} {
 		if !(Visit{Status: string(status)}).Open() {
 			t.Errorf("%q is a visit the desk still has to finish", status)
 		}
 	}
-	for _, status := range []Status{StatusCompleted, StatusCancelled, StatusRejected, StatusNoShow} {
+	// expired is closed, not merely late: the sweep that writes it has already finished the
+	// visit, so an open answer here would invite the desk to cancel a row twice.
+	for _, status := range []Status{StatusCompleted, StatusCancelled, StatusRejected,
+		StatusNoShow, StatusExpired} {
 		if (Visit{Status: string(status)}).Open() {
 			t.Errorf("%q is closed but reported open", status)
 		}

@@ -297,3 +297,19 @@ func TestDeclaredValue(t *testing.T) {
 		})
 	}
 }
+
+// Only a declaration that has crossed a barrier can be disputed, and the sweep is the only
+// writer of overdue. Both are the schema's vocabulary rather than a caller's string.
+func TestDisputableFollowsWhatActuallyMoved(t *testing.T) {
+	for _, status := range []Status{StatusReleased, StatusPartiallyReturned, StatusOverdue,
+		StatusReturned, StatusClosed} {
+		if !disputable(string(status)) {
+			t.Errorf("%q has crossed a barrier but cannot be disputed", status)
+		}
+	}
+	for _, status := range []Status{StatusPending, StatusApproved, StatusRejected} {
+		if disputable(string(status)) {
+			t.Errorf("%q never left the desk but disputable() accepts it", status)
+		}
+	}
+}

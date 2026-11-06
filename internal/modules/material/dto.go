@@ -90,6 +90,12 @@ type DecisionRequest struct {
 	Note   string `json:"note" validate:"omitempty,max=512"`
 }
 
+// DisputeRequest is the one sentence that has to accompany a disputed declaration. 512
+// because that is the width of the audit reason the words are filed in.
+type DisputeRequest struct {
+	Reason string `json:"reason" validate:"required,max=512"`
+}
+
 // ReturnRequest is the desk recording what came back, line by line.
 type ReturnRequest struct {
 	Note  string `json:"note" validate:"omitempty,max=512"`

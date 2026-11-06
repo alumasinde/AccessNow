@@ -26,15 +26,22 @@ var subscribedKeys = []string{
 	"pass.approved", "pass.rejected", "pass.cancelled", "pass.expired",
 	// Visitors.
 	"visit.created", "approval.requested",
+	// The two ways a visit ends with nobody having come, both written by the sweep.
+	"visit.no_show", "visit.expired",
 	// Goods.
 	"material.approval_needed", "material.declared", "material.released", "material.received",
 	"material.returned",
+	// The owed-back sweep and the desk's dispute of a count.
+	"material.overdue", "material.disputed",
 	// Staff step-outs.
 	"outpass.approval_needed", "outpass.requested", "outpass.departed", "outpass.returned",
 	"outpass.overdue", "outpass.unreturned",
 	// Vehicles.
 	"vehicle.approval_needed", "vehicle.logged", "vehicle.entered", "vehicle.exited",
 	"vehicle.overstaying",
+	// The screening lists. A watchlist hit is the quiet alarm the guard is not shown, and a
+	// denied entry is the one the supervisor has to hear about before the visitor walks off.
+	"blocklist.watched_hit", "blocklist.denied_entry",
 }
 
 // maxAttempts is the retry budget one notice gets before it stops and shows its error. It is

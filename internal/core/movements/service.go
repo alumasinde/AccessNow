@@ -18,19 +18,23 @@ import (
 )
 
 type Service struct {
-	pool   *sqlx.DB
-	repo   *Repository
-	passes *passes.Repository
-	chain  audit.Writer
-	events events.Publisher
-	relay  events.Relay
+	pool     *sqlx.DB
+	repo     *Repository
+	passes   *passes.Repository
+	chain    audit.Writer
+	events   events.Publisher
+	relay    events.Relay
+	screener Screener
 }
 
 // relay is the outbox drain. It is a dependency rather than a goroutine so a scan's
 // reactions finish before the response goes out, and a failure never costs a movement.
+// screener is the list a barrier consults before it opens; nil means the site does not
+// screen at all, which is how the gate keeps working with the module switched off.
 func NewService(pool *sqlx.DB, repo *Repository, passRepo *passes.Repository, chain audit.Writer,
-	bus events.Publisher, relay events.Relay) *Service {
-	return &Service{pool: pool, repo: repo, passes: passRepo, chain: chain, events: bus, relay: relay}
+	bus events.Publisher, relay events.Relay, screener Screener) *Service {
+	return &Service{pool: pool, repo: repo, passes: passRepo, chain: chain, events: bus,
+		relay: relay, screener: screener}
 }
 
 // Scan is the whole gate decision: window, status and gate category are checked here, the
@@ -47,7 +51,7 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 		return Outcome{}, err
 	}
 
-	refused := s.refuseReason(ctx, scope, pass, scan)
+	refused, verdict := s.refuse(ctx, scope, pass, scan)
 	result := ResultGranted
 	if refused != "" {
 		result = ResultDenied
@@ -65,11 +69,32 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 			PassNo: pass.PassNo, Status: pass.Status,
 		}, nil
 	}
+	s.note(ctx, scope, pass, verdict, movement, result, refused)
 	s.drain(ctx, scope)
 	return Outcome{
 		Movement: movement, Result: result, Reason: refused,
 		PassNo: pass.PassNo, Status: pass.Status,
 	}, nil
+}
+
+// note hands the screening answer back to whoever gave it, once the movement it decided is
+// on file. The guard already has his colour, so a list that fails to write its own record is
+// logged and left alone: it never turns a green light into an error page.
+func (s *Service) note(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	verdict Verdict, movement Movement, result Result, reason string) {
+	if s.screener == nil || len(verdict.Matches) == 0 {
+		return
+	}
+	if err := s.screener.Note(ctx, verdict, HitRef{
+		MovementID: movement.ID, TenantID: scope.TenantID, SiteID: pass.SiteID,
+		GateID: scope.GateID, GateSessionID: scope.GateShiftID, ActorUserID: scope.UserID,
+		PassID: pass.ID, PassNo: pass.PassNo,
+		SubjectName: firstOf(derefString(movement.SubjectName), pass.SubjectName),
+		Result:      result, Reason: reason,
+	}); err != nil {
+		logging.From(ctx).ErrorContext(ctx, "screening record", "movement_id", movement.ID,
+			"error", err)
+	}
 }
 
 // drain runs the reactions this tenant owes, including any backlog a previous request
@@ -102,9 +127,38 @@ func (s *Service) loadPass(ctx context.Context, scope tenancy.Scope, scan Scan) 
 	}
 }
 
-// refuseReason returns empty when the gate should open. The status stays on the response
-// so the guard screen can show what the pass actually is.
-func (s *Service) refuseReason(ctx context.Context, scope tenancy.Scope, pass passes.Pass, scan Scan) string {
+// refuse returns empty when the gate should open, and the screening verdict that came with
+// the answer. The status stays on the response so the guard screen can show what the pass
+// actually is.
+//
+// The list is asked last on purpose: a pass outside its window or already on site is refused
+// by facts Core holds on its own row, and a gate that is busy should not spend a query on a
+// screening answer nobody needed.
+func (s *Service) refuse(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	scan Scan) (string, Verdict) {
+	if reason := s.ruleRefusal(ctx, scope, pass, scan); reason != "" {
+		return reason, Verdict{}
+	}
+	if s.screener == nil {
+		return "", Verdict{}
+	}
+	verdict, err := s.screener.Screen(ctx, queryOf(scope, pass, scan))
+	if err != nil {
+		// A list that could not be read is not a list with nothing on it. The gate stays shut
+		// and says which of the two the guard is looking at, because "the screening service
+		// is down" is a sentence he can act on and "not on the list" is not.
+		logging.From(ctx).ErrorContext(ctx, "screening", "pass_no", pass.PassNo, "error", err)
+		return deny("the screening list could not be read"), Verdict{}
+	}
+	if verdict.Blocked {
+		return deny(verdict.Reason), verdict
+	}
+	return "", verdict
+}
+
+// ruleRefusal is the decision Core can make by itself: gate category, validity window, pass
+// status and the entry an exit has to pair against.
+func (s *Service) ruleRefusal(ctx context.Context, scope tenancy.Scope, pass passes.Pass, scan Scan) string {
 	categories, err := s.repo.GateCategories(ctx, scope.GateID)
 	if err != nil {
 		return deny("could not read the gate categories")

@@ -227,6 +227,70 @@ func (r *Repository) MarkClosed(ctx context.Context, tenantID, id int64, to Stat
 		string(to), nullable(userID), id, tenantID)
 }
 
+// overdueCondition is the sweep's whole question, and it is asked of the database clock so
+// that a cron job running on another machine cannot disagree with the register it writes.
+// A pass that has already come back is not in it, which is what keeps a late return from
+// being reported as a debt afterwards.
+const overdueCondition = `m.status IN ('released', 'partially_returned')
+	AND m.expected_return_at IS NOT NULL AND m.expected_return_at <= UTC_TIMESTAMP(6)`
+
+// DueOverdue is the rows a sweep owes a notice for. Escalate is the only writer of the
+// pass's overdue status, and reading first is what lets each declaration get its own event
+// instead of one blunt notice per site.
+func (r *Repository) DueOverdue(ctx context.Context, tenantID int64) ([]Material, error) {
+	query := `SELECT ` + materialColumns + materialFrom +
+		` WHERE m.tenant_id = ? AND (` + overdueCondition + `)`
+	rows := []Material{}
+	if err := r.q.SelectContext(ctx, &rows, query, tenantID); err != nil {
+		return nil, fmt.Errorf("read goods passes due back: %w", err)
+	}
+	return rows, nil
+}
+
+// MarkOverdue is the sweep's compare-and-set on the status it read, so a second run in the
+// same hour moves nothing and publishes nothing.
+func (r *Repository) MarkOverdue(ctx context.Context, tenantID, id int64, from Status) (bool, error) {
+	return r.move(ctx, `UPDATE material_passes SET status = ?
+		WHERE id = ? AND tenant_id = ? AND status = ?`, string(StatusOverdue), id, tenantID,
+		string(from))
+}
+
+// MarkDisputed is the desk saying the declaration itself is wrong. It is reached from every
+// open state, including overdue: the commonest reason a load is disputed is that somebody
+// has been told it is owed back.
+func (r *Repository) MarkDisputed(ctx context.Context, tenantID, id int64, from Status) (bool, error) {
+	return r.move(ctx, `UPDATE material_passes SET status = ?
+		WHERE id = ? AND tenant_id = ? AND status = ?`, string(StatusDisputed), id, tenantID,
+		string(from))
+}
+
+// MarkLinesOverdue stamps the individual lines the load is owed on and reports how many it
+// took. A line that carries its own date is judged by it, because a lorry of six things with
+// three return dates is not one debt; a line with no date of its own is judged by the pass,
+// which is why the sweep only ever calls this for a pass it has just found to be due.
+func (r *Repository) MarkLinesOverdue(ctx context.Context, tenantID, materialID int64) (int, error) {
+	const query = `
+		UPDATE material_items
+		SET    overdue_since = COALESCE(overdue_since, UTC_TIMESTAMP(6)), status = ?
+		WHERE  tenant_id = ? AND material_pass_id = ? AND returnable = 1
+		  AND  status IN ('` + ItemReleased + `', '` + ItemPartial + `')
+		  AND  (expected_return_at IS NULL OR expected_return_at <= UTC_TIMESTAMP(6))`
+	result, err := r.q.ExecContext(ctx, query, ItemOverdue, tenantID, materialID)
+	if err != nil {
+		return 0, fmt.Errorf("mark lines overdue: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return int(n), err
+}
+
+func (r *Repository) move(ctx context.Context, query string, args ...any) (bool, error) {
+	result, err := r.q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("update goods pass: %w", err)
+	}
+	return db.RowsChanged(result)
+}
+
 // ReleaseLines moves every declared line across the barrier at once: outward goods are
 // counted as released, inward goods as received. Either way what actually moved is
 // recorded separately from what the desk declared.

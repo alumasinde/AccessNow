@@ -203,9 +203,23 @@ func (r *Repository) exec(ctx context.Context, query string, args ...any) error 
 	return nil
 }
 
-func (r *Repository) MarkStatus(ctx context.Context, tenantID, visitID int64, status Status) error {
-	return r.exec(ctx, `UPDATE visits SET status = ? WHERE id = ? AND tenant_id = ?`,
-		string(status), visitID, tenantID)
+// move is a compare-and-set that reports whether it took the row. Zero rows is not an
+// error: it is somebody else having got there first, which is exactly what the caller needs
+// to know before it announces anything.
+func (r *Repository) move(ctx context.Context, query string, args ...any) (bool, error) {
+	result, err := r.q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("update visit: %w", err)
+	}
+	return db.RowsChanged(result)
+}
+
+// MarkStatus moves a visit to the status the desk put on the pass. It is a compare and set
+// on the status the caller read, so two answers to one pending visit cannot both apply and
+// both be announced.
+func (r *Repository) MarkStatus(ctx context.Context, tenantID, visitID int64, from, to Status) (bool, error) {
+	return r.move(ctx, `UPDATE visits SET status = ? WHERE id = ? AND tenant_id = ? AND status = ?`,
+		string(to), visitID, tenantID, string(from))
 }
 
 func (r *Repository) MarkHostResponse(ctx context.Context, tenantID, visitID int64, response string) error {
@@ -218,20 +232,80 @@ func (r *Repository) MarkHostResponse(ctx context.Context, tenantID, visitID int
 // MarkCheckIn and MarkCheckOut are compare and set, not blind writes: the gate reaction
 // is delivered at least once, and a replayed row must not move checked_in_at forward or
 // reopen a visit that already left.
-func (r *Repository) MarkCheckIn(ctx context.Context, tenantID, visitID, gateID, movementID int64) error {
-	return r.exec(ctx, `
+//
+// The inbound guard names the statuses that may still arrive rather than "anything except
+// on_site", because a cancelled or refused visit whose badge was scanned yesterday must stay
+// cancelled when an offline tablet syncs it this morning.
+func (r *Repository) MarkCheckIn(ctx context.Context, tenantID, visitID, gateID, movementID int64) (bool, error) {
+	return r.move(ctx, `
 		UPDATE visits
 		SET    status = ?, checked_in_at = UTC_TIMESTAMP(6), checked_in_gate_id = ?,
 		       check_in_movement_id = ?
-		WHERE  id = ? AND tenant_id = ? AND status <> ?`,
-		string(StatusOnSite), gateID, movementID, visitID, tenantID, string(StatusOnSite))
+		WHERE  id = ? AND tenant_id = ? AND status IN (?, ?)`,
+		string(StatusOnSite), num(gateID), num(movementID), visitID, tenantID,
+		string(StatusPending), string(StatusApproved))
 }
 
-func (r *Repository) MarkCheckOut(ctx context.Context, tenantID, visitID, gateID, movementID int64) error {
-	return r.exec(ctx, `
+func (r *Repository) MarkCheckOut(ctx context.Context, tenantID, visitID, gateID, movementID int64) (bool, error) {
+	return r.move(ctx, `
 		UPDATE visits
 		SET    status = ?, checked_out_at = UTC_TIMESTAMP(6), checked_out_gate_id = ?,
 		       check_out_movement_id = ?
 		WHERE  id = ? AND tenant_id = ? AND status = ?`,
-		string(StatusCompleted), gateID, movementID, visitID, tenantID, string(StatusOnSite))
+		string(StatusCompleted), num(gateID), num(movementID), visitID, tenantID, string(StatusOnSite))
+}
+
+// MarkArrival is the person's own history: how many times they have been on site and when
+// they were last here. The two live on visitors, not visits, because the desk screen that
+// says "this is a regular" asks about the person and no join across every visit they have
+// ever made is a cheap way to answer it.
+//
+// It is called only when MarkCheckIn actually moved the row, so a tablet syncing yesterday's
+// scan this morning cannot count the same arrival twice.
+func (r *Repository) MarkArrival(ctx context.Context, tenantID, visitorID int64) error {
+	return r.exec(ctx, `
+		UPDATE visitors
+		SET    visit_count = visit_count + 1, last_visited_at = UTC_TIMESTAMP(6)
+		WHERE  id = ? AND tenant_id = ?`, visitorID, tenantID)
+}
+
+// The two ways a visit ends without anybody coming. Both are the sweep's, never a caller's:
+// the point of reading the rows first is that each one gets its own notice, and the point
+// of naming the window in the SQL is that the clock is the database's, not whichever
+// machine the cron job happened to run on.
+const (
+	// A guest the host said yes to, whose stated window ran out with no scan at the barrier.
+	noShowCondition = `v.status = 'approved' AND v.checked_in_at IS NULL
+		AND v.expected_until IS NOT NULL AND v.expected_until <= UTC_TIMESTAMP(6)`
+	// Anything still open that never arrived: a pending ask nobody answered, or an approval
+	// with no stated window whose pass has stopped working. A walk-in with neither date is
+	// left alone because nothing has passed yet for it to have missed.
+	expiredCondition = `v.status IN ('pending', 'approved') AND v.checked_in_at IS NULL
+		AND ((v.expected_until IS NOT NULL AND v.expected_until <= UTC_TIMESTAMP(6))
+		  OR (v.expected_until IS NULL AND p.valid_until IS NOT NULL
+		      AND p.valid_until <= UTC_TIMESTAMP(6)))`
+)
+
+func (r *Repository) DueForNoShow(ctx context.Context, tenantID int64) ([]Visit, error) {
+	return r.due(ctx, tenantID, noShowCondition)
+}
+
+func (r *Repository) DueForExpired(ctx context.Context, tenantID int64) ([]Visit, error) {
+	return r.due(ctx, tenantID, expiredCondition)
+}
+
+func (r *Repository) due(ctx context.Context, tenantID int64, condition string) ([]Visit, error) {
+	query := `SELECT ` + visitColumns + visitFrom + ` WHERE v.tenant_id = ? AND (` + condition + `)`
+	rows := []Visit{}
+	if err := r.q.SelectContext(ctx, &rows, query, tenantID); err != nil {
+		return nil, fmt.Errorf("read visits due: %w", err)
+	}
+	return rows, nil
+}
+
+// CloseVisit is the sweep's compare-and-set. It reports whether it took the row so the
+// second run of the same hour publishes nothing.
+func (r *Repository) CloseVisit(ctx context.Context, tenantID, visitID int64, from, to Status) (bool, error) {
+	return r.move(ctx, `UPDATE visits SET status = ? WHERE id = ? AND tenant_id = ? AND status = ?`,
+		string(to), visitID, tenantID, string(from))
 }

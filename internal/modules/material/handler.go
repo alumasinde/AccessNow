@@ -130,6 +130,47 @@ func (h *Handler) Return(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, viewOf(material))
 }
 
+// Escalate is the sweep, on the same POST endpoint a cron job calls and a supervisor's
+// button presses.
+func (h *Handler) Escalate(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	moved, err := h.svc.Escalate(r.Context(), scope)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	httpx.OK(w, moved)
+}
+
+// Dispute is the desk saying the record of a load is wrong, with the words that say how.
+func (h *Handler) Dispute(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	materialID, err := httpx.ID(r, "materialID")
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	var req DisputeRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	material, err := h.svc.Dispute(r.Context(), scope, materialID, req.Reason)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	httpx.OK(w, viewOf(material))
+}
+
 // Outstanding answers the dashboard question "what is still out there". It is a list of
 // lines, not passes, because a line is the thing a tenant chases.
 func (h *Handler) Outstanding(w http.ResponseWriter, r *http.Request) {

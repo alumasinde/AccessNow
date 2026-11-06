@@ -9,6 +9,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"accessnow/internal/core/passes"
+	"accessnow/internal/platform/audit"
 	"accessnow/internal/platform/db"
 	"accessnow/internal/platform/errs"
 	"accessnow/internal/platform/events"
@@ -23,11 +24,15 @@ type Service struct {
 	passes    *passes.Service
 	passRepo  *passes.Repository
 	publisher events.Publisher
+	chain     audit.Writer
 }
 
 func NewService(pool *sqlx.DB, repo *Repository, passService *passes.Service,
-	passRepo *passes.Repository, publisher events.Publisher) *Service {
-	return &Service{pool: pool, repo: repo, passes: passService, passRepo: passRepo, publisher: publisher}
+	passRepo *passes.Repository, publisher events.Publisher, chain audit.Writer) *Service {
+	return &Service{
+		pool: pool, repo: repo, passes: passService, passRepo: passRepo, publisher: publisher,
+		chain: chain,
+	}
 }
 
 // Declare is one goods pass with its lines. kind and return_type pick the pass type, so

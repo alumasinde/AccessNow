@@ -75,7 +75,8 @@ func (v Visit) VisitorName() string { return v.VisitorFirst + " " + v.VisitorLas
 
 func (v Visit) Open() bool {
 	return v.Status != string(StatusCompleted) && v.Status != string(StatusCancelled) &&
-		v.Status != string(StatusRejected) && v.Status != string(StatusNoShow)
+		v.Status != string(StatusRejected) && v.Status != string(StatusNoShow) &&
+		v.Status != string(StatusExpired)
 }
 
 // NewVisitor is what the caller may say about the person at the desk.

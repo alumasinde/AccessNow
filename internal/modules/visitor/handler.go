@@ -141,6 +141,22 @@ func (h *Handler) CheckOut(w http.ResponseWriter, r *http.Request) {
 	h.arrive(w, r, h.svc.CheckOut)
 }
 
+// CloseOut is the sweep, on the same POST endpoint a cron job calls and the button a
+// supervisor presses before the end-of-day report.
+func (h *Handler) CloseOut(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	moved, err := h.svc.CloseOut(r.Context(), scope)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	httpx.OK(w, moved)
+}
+
 func (h *Handler) arrive(w http.ResponseWriter, r *http.Request,
 	do func(context.Context, tenancy.Scope, int64) (Visit, movements.Outcome, error)) {
 	scope, err := tenancy.Require(r.Context())
