@@ -170,8 +170,13 @@ Always-on Core, not sellable modules.
 - ✅ Unit and engine tests, the layering test, and a router-level HTTP test that serves
   `/healthz` and the not-found boundary through the real handler stack. CI (`.github/workflows`)
   runs gofmt, build, vet and tests, with `.golangci.yml` and a multi-stage `Dockerfile`. The
-  webhook and sync transports are tested for signing, address refusal, backoff and receiver
-  behaviour, but have not been exercised against a real external system.
+  webhook and sync transports are covered by tests and have been exercised against live external
+  systems: a signed Webhook.site receiver and an Odoo 20 demo ERP (see §5).
+- ✅ `docs/openapi.yaml` is the checked-in OpenAPI 3.0.3 contract for the mounted API. It covers
+  all 191 operations across 154 paths (including `/healthz` and `/readyz`), the four auth
+  mechanisms (session cookie, bearer token, `X-API-Key`, `X-Device-Token`), request and response
+  DTO schemas, standard error envelope, pagination cursors, and the module-disabled 404 behaviour.
+  The frontend can generate its client types from it.
 - ✅ Every gate surface that has code now has tests: visitor, vehicle, material, staff,
   contractor, scanning, roll-call, offline, blocklist, rules, approval, notifications, reports
   (including PDF structure and pagination), compliance (including the action matrix) and
