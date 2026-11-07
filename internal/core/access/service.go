@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,8 +59,42 @@ func (s *Service) Can(ctx context.Context, tenantID, userID int64, permission st
 	return values[permission] || values[wildcard], nil
 }
 
+// Permissions is the complete grant set the UI uses to decide which surfaces to show.
+// Route guards still ask Can for every request; this is not an authorization shortcut.
+func (s *Service) Permissions(ctx context.Context, tenantID, userID int64) ([]string, error) {
+	if tenantID == 0 || userID == 0 {
+		return nil, errs.Unauthenticated("request carries no identity")
+	}
+	values, err := s.load("permissions:"+key(tenantID)+":"+key(userID), func() (map[string]bool, error) {
+		return s.repo.Permissions(ctx, tenantID, userID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(values))
+	for permission, granted := range values {
+		if granted {
+			out = append(out, permission)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Modules is the tenant's full switchboard, including disabled entries, so the UI can
+// distinguish "not enabled" from "no access".
+func (s *Service) Modules(ctx context.Context, tenantID int64) (map[string]bool, error) {
+	return s.load("modules:"+key(tenantID), func() (map[string]bool, error) {
+		return s.repo.EnabledModules(ctx, tenantID)
+	})
+}
+
 func (s *Service) DoesGateWork(ctx context.Context, tenantID, userID int64) (bool, error) {
 	return s.repo.GateWork(ctx, tenantID, userID)
+}
+
+func (s *Service) Auditor(ctx context.Context, tenantID, userID int64) (bool, error) {
+	return s.repo.IsAuditor(ctx, tenantID, userID)
 }
 
 // RequirePermission guards a state transition a caller could otherwise talk their way

@@ -64,6 +64,8 @@ type LoginResult struct {
 	Token              string
 	User               User
 	Scope              tenancy.Scope
+	Tenant             Tenant
+	Site               *Site
 	MustChangePassword bool
 	ExpiresAt          time.Time
 }
@@ -71,6 +73,12 @@ type LoginResult struct {
 func (s *Service) Login(ctx context.Context, in LoginInput) (LoginResult, error) {
 	tenant, err := s.repo.TenantBySlug(ctx, in.TenantSlug)
 	if err != nil {
+		// An unknown workspace must cost the same and read the same as a wrong password, or the
+		// login form becomes a way to list which tenants exist.
+		if errs.CodeOf(err) == errs.CodeNotFound {
+			security.VerifyPassword(in.Password, dummyHash)
+			return LoginResult{}, errs.Unauthenticated("email or password is wrong")
+		}
 		return LoginResult{}, err
 	}
 
@@ -86,17 +94,30 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginResult, error)
 	if user.LockedUntil != nil && user.LockedUntil.After(time.Now().UTC()) {
 		return LoginResult{}, errs.New(errs.CodeTooManyRequests, "account is temporarily locked, try again later")
 	}
-	if !user.Loginable() {
-		return LoginResult{}, errs.Forbidden("this account is " + user.Status)
-	}
-	if !security.VerifyPassword(in.Password, *user.PasswordHash) {
+	// The password is checked before the account's status is disclosed, so a suspended account
+	// is only revealed to someone who holds its password.
+	if user.PasswordHash == nil || !security.VerifyPassword(in.Password, *user.PasswordHash) {
+		if user.PasswordHash == nil {
+			security.VerifyPassword(in.Password, dummyHash)
+		}
 		s.recordFailure(ctx, user)
 		return LoginResult{}, errs.Unauthenticated("email or password is wrong")
+	}
+	if !user.Loginable() {
+		return LoginResult{}, errs.Forbidden("this account is " + user.Status)
 	}
 
 	site, err := s.repo.FirstSite(ctx, tenant.ID)
 	if err != nil {
 		return LoginResult{}, err
+	}
+	var siteRow *Site
+	if site != nil {
+		found, err := s.repo.SiteByID(ctx, tenant.ID, *site)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		siteRow = &found
 	}
 	token, err := security.NewToken()
 	if err != nil {
@@ -131,6 +152,8 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginResult, error)
 	return LoginResult{
 		Token:              token,
 		User:               user,
+		Tenant:             tenant,
+		Site:               siteRow,
 		MustChangePassword: user.MustChangePassword,
 		ExpiresAt:          expiresAt,
 		Scope: tenancy.Scope{
@@ -141,12 +164,8 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginResult, error)
 }
 
 func (s *Service) recordFailure(ctx context.Context, user User) {
-	var lockedUntil *time.Time
-	if user.FailedAttempts+1 >= maxFailedLogins {
-		at := time.Now().UTC().Add(s.lock)
-		lockedUntil = &at
-	}
-	if err := s.repo.RecordFailure(ctx, user.ID, lockedUntil); err != nil {
+	lockedUntil := time.Now().UTC().Add(s.lock)
+	if err := s.repo.RecordFailure(ctx, user.ID, maxFailedLogins, lockedUntil); err != nil {
 		logging.From(ctx).ErrorContext(ctx, "could not record a failed login", "error", err)
 	}
 	if err := s.chain.Write(ctx, s.pool, audit.Entry{
@@ -196,6 +215,21 @@ func (s *Service) SetShiftCloser(closer ShiftCloser) { s.shift = closer }
 
 func (s *Service) Current(ctx context.Context, scope tenancy.Scope) (User, error) {
 	return s.repo.UserByID(ctx, scope.UserID)
+}
+
+func (s *Service) TenantByID(ctx context.Context, id int64) (Tenant, error) {
+	return s.repo.TenantByID(ctx, id)
+}
+
+func (s *Service) SiteByID(ctx context.Context, tenantID, siteID int64) (*Site, error) {
+	if siteID == 0 {
+		return nil, nil
+	}
+	site, err := s.repo.SiteByID(ctx, tenantID, siteID)
+	if err != nil {
+		return nil, err
+	}
+	return &site, nil
 }
 
 func (s *Service) Logout(ctx context.Context, scope tenancy.Scope) error {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 	// A slim container image has no zoneinfo, and every reader's clock would silently be UTC.
@@ -46,22 +47,30 @@ func run() error {
 	// A gate scan relays its own events inside the request. A desk write has no scan coming,
 	// so this loop is what delivers its events - and this is what gets the notices it filed
 	// out to a gateway, since a message that waits for the next badge is a message late.
-	go deps.Backlog.Run(ctx)
-	go deps.Delivery.Run(ctx)
+	var loops sync.WaitGroup
+	start := func(run func(context.Context)) {
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			run(ctx)
+		}()
+	}
+	start(deps.Backlog.Run)
+	start(deps.Delivery.Run)
 	// A scheduled export has no request to ride: the loop is what notices its moment passed.
-	go deps.ReportsLoop.Run(ctx)
+	start(deps.ReportsLoop.Run)
 	// Webhooks are a queue like notifications: the gate scan's event is written, and this loop
 	// is what turns it into a request to a tenant's system.
-	go deps.WebhooksLoop.Run(ctx)
+	start(deps.WebhooksLoop.Run)
 	// An HR or ERP sync is the same shape: the desk files a job, and this loop is what calls the
 	// remote system, links what came back and records the outcome.
-	go deps.SyncLoop.Run(ctx)
+	start(deps.SyncLoop.Run)
 	// Nightly rules are the one evaluation with no gate and no request to ride: the loop is
 	// what walks the open register.
-	go deps.RulesLoop.Run(ctx)
+	start(deps.RulesLoop.Run)
 	// Retention owners hear before their data becomes purgeable, even when no purge request
 	// has been made yet.
-	go deps.ComplianceLoop.Run(ctx)
+	start(deps.ComplianceLoop.Run)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -87,6 +96,15 @@ func run() error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
+	}
+	// The loops stop on the same cancelled context; wait so none of them is mid-write when the
+	// pool closes underneath it.
+	done := make(chan struct{})
+	go func() { loops.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		logger.Warn("background loops still running at shutdown deadline")
 	}
 	return pool.Close()
 }

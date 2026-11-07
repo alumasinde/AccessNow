@@ -43,7 +43,9 @@ import (
 func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	if cfg.TrustProxyHeaders {
+		r.Use(middleware.RealIP)
+	}
 	r.Use(requestLog(logger))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(cfg.HandlerTimeout))

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"accessnow/internal/platform/logging"
@@ -49,7 +50,13 @@ func secretFor(ref *string) string {
 // this process allocate without bound.
 func post(ctx context.Context, hook Webhook, body []byte) (int, string, error) {
 	timeout := time.Duration(hook.TimeoutMS) * time.Millisecond
-	client := &http.Client{Timeout: timeout, Transport: guardedTransport(timeout)}
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: guardedTransport(timeout),
+		// A receiver that redirects is a receiver that moved; following it would re-send a signed
+		// body to a host the tenant never registered, and could downgrade it to plain http.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, hook.URL, strings.NewReader(string(body)))
 	if err != nil {
 		return 0, "", fmt.Errorf("build webhook request: %w", err)
@@ -77,20 +84,10 @@ func post(ctx context.Context, hook Webhook, body []byte) (int, string, error) {
 // first defence; this is the one that still holds when the name resolves somewhere else by the
 // time the webhook fires.
 func guardedTransport(timeout time.Duration) *http.Transport {
-	dialer := &net.Dialer{Timeout: timeout}
+	dialer := &net.Dialer{Timeout: timeout, Control: refusePrivateDial}
 	return &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, address)
-			if err != nil {
-				return nil, err
-			}
-			if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok && !publicIP(tcp.IP) {
-				_ = conn.Close()
-				return nil, fmt.Errorf("webhook target resolved to a private address")
-			}
-			return conn, nil
-		},
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 	}
@@ -99,15 +96,54 @@ func guardedTransport(timeout time.Duration) *http.Transport {
 // publicIP is the address rule: anything a server should be reachable at is fine, anything that
 // is this machine, this network or a link-local neighbour is not.
 func publicIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+	if ip == nil {
+		return false
+	}
+	// An IPv4 address wrapped in IPv6 (::ffff:10.0.0.1) must be judged as the IPv4 it is.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return false
 	}
-	// IPv6 unique local addresses are not covered by IsPrivate on every Go release.
-	if len(ip) == net.IPv6len && ip[0] == 0xfc || len(ip) == net.IPv6len && ip[0] == 0xfd {
-		return false
+	for _, block := range nonPublicBlocks {
+		if block.Contains(ip) {
+			return false
+		}
 	}
 	return true
+}
+
+// nonPublicBlocks are ranges net.IP's helpers do not cover but a server must still never dial:
+// carrier-grade NAT (some clouds put their metadata service there), benchmarking and
+// documentation space, IPv6 unique-local, and the reserved 240/4 block.
+var nonPublicBlocks = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, cidr := range []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15",
+		"198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "fc00::/7", "2001:db8::/32", "64:ff9b::/96",
+	} {
+		if _, block, err := net.ParseCIDR(cidr); err == nil {
+			out = append(out, block)
+		}
+	}
+	return out
+}()
+
+// refusePrivateDial runs as the dialer's Control hook, after DNS resolution and before the socket
+// connects. Checking the address after DialContext returns would already have sent a SYN to the
+// internal host, and the difference between "refused" and "blocked" would tell a tenant which
+// internal ports are open.
+func refusePrivateDial(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("unreadable dial address")
+	}
+	if ip := net.ParseIP(host); ip == nil || !publicIP(ip) {
+		return fmt.Errorf("target resolved to a private address")
+	}
+	return nil
 }
 
 // Loop is the delivery worker's heartbeat.

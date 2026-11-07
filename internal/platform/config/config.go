@@ -28,10 +28,14 @@ type Config struct {
 	HandlerTimeout time.Duration `env:"HTTP_HANDLER_TIMEOUT,overwrite,default=20s"`
 	SessionTTL     time.Duration `env:"SESSION_TTL,overwrite,default=12h"`
 	CookieSecure   bool          `env:"COOKIE_SECURE,overwrite,default=false"`
-	AllowedOrigins []string      `env:"ALLOWED_ORIGINS,overwrite,delimiter=\\,"`
-	LoginAttempts  int           `env:"LOGIN_ATTEMPTS_PER_MINUTE,overwrite,default=10"`
-	ScanRate       int           `env:"SCAN_REQUESTS_PER_MINUTE,overwrite,default=300"`
-	Database       Database      `env:",prefix=DB_,overwrite"`
+	// TrustProxyHeaders makes the server believe X-Forwarded-For / X-Real-IP. Turn it on only
+	// when every request arrives through a proxy you control that overwrites those headers;
+	// otherwise any client can pick its own IP and walk past the login rate limit.
+	TrustProxyHeaders bool     `env:"TRUST_PROXY_HEADERS,overwrite,default=false"`
+	AllowedOrigins    []string `env:"ALLOWED_ORIGINS,overwrite,delimiter=\\,"`
+	LoginAttempts     int      `env:"LOGIN_ATTEMPTS_PER_MINUTE,overwrite,default=10"`
+	ScanRate          int      `env:"SCAN_REQUESTS_PER_MINUTE,overwrite,default=300"`
+	Database          Database `env:",prefix=DB_,overwrite"`
 }
 
 func Load(ctx context.Context) (Config, error) {
@@ -60,6 +64,19 @@ func (c Config) check() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+	}
+	if c.Production() {
+		if !c.CookieSecure {
+			return fmt.Errorf("COOKIE_SECURE must be true when APP_ENV=production")
+		}
+		if len(c.AllowedOrigins) == 0 {
+			return fmt.Errorf("ALLOWED_ORIGINS must be set when APP_ENV=production")
+		}
+		for _, origin := range c.AllowedOrigins {
+			if strings.TrimSpace(origin) == "*" {
+				return fmt.Errorf("ALLOWED_ORIGINS must not be * when credentials are allowed")
+			}
+		}
 	}
 	return nil
 }

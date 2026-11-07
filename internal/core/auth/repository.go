@@ -52,6 +52,19 @@ func (r *Repository) FindByIdentifier(ctx context.Context, tenantID int64, ident
 	return u, nil
 }
 
+func (r *Repository) TenantByID(ctx context.Context, id int64) (Tenant, error) {
+	const query = `SELECT id, name, timezone FROM tenants WHERE id = ? AND status = 'active'`
+	var t Tenant
+	err := r.q.GetContext(ctx, &t, query, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Tenant{}, errs.NotFound("tenant")
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("read tenant: %w", err)
+	}
+	return t, nil
+}
+
 func (r *Repository) FirstSite(ctx context.Context, tenantID int64) (*int64, error) {
 	const query = `SELECT id FROM sites WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1`
 	var id int64
@@ -63,6 +76,20 @@ func (r *Repository) FirstSite(ctx context.Context, tenantID int64) (*int64, err
 		return nil, fmt.Errorf("read default site: %w", err)
 	}
 	return &id, nil
+}
+
+func (r *Repository) SiteByID(ctx context.Context, tenantID, siteID int64) (Site, error) {
+	const query = `SELECT id, tenant_id, name, timezone FROM sites
+	               WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`
+	var site Site
+	err := r.q.GetContext(ctx, &site, query, siteID, tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Site{}, errs.NotFound("site")
+	}
+	if err != nil {
+		return Site{}, fmt.Errorf("read site: %w", err)
+	}
+	return site, nil
 }
 
 func (r *Repository) UserByID(ctx context.Context, userID int64) (User, error) {
@@ -160,12 +187,16 @@ func (r *Repository) RecordLogin(ctx context.Context, userID int64) error {
 	return nil
 }
 
-func (r *Repository) RecordFailure(ctx context.Context, userID int64, lockedUntil *time.Time) error {
+// RecordFailure counts the miss and decides the lock inside one statement. The decision used to
+// be made from a copy of the row read before the password check, so a burst of parallel guesses
+// all saw the same count and none of them tripped the lock.
+func (r *Repository) RecordFailure(ctx context.Context, userID int64, maxAttempts int, lockedUntil time.Time) error {
 	const query = `
 		UPDATE users
-		SET    failed_attempts = failed_attempts + 1, locked_until = ?
+		SET    locked_until    = IF(failed_attempts + 1 >= ?, ?, locked_until),
+		       failed_attempts = failed_attempts + 1
 		WHERE  id = ?`
-	if _, err := r.q.ExecContext(ctx, query, lockedUntil, userID); err != nil {
+	if _, err := r.q.ExecContext(ctx, query, maxAttempts, lockedUntil, userID); err != nil {
 		return fmt.Errorf("record failed login: %w", err)
 	}
 	return nil

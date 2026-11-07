@@ -1325,20 +1325,10 @@ func syncHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func guardedSyncTransport(timeout time.Duration) *http.Transport {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialer := &net.Dialer{Timeout: 5 * time.Second, Control: refusePrivateDial}
 	return &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, address)
-			if err != nil {
-				return nil, err
-			}
-			if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok && !publicIP(tcp.IP) {
-				_ = conn.Close()
-				return nil, fmt.Errorf("sync target resolved to a private address")
-			}
-			return conn, nil
-		},
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: timeout,
 	}

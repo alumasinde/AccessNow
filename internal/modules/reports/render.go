@@ -66,6 +66,21 @@ func reportTitle(name string, from, to time.Time) string {
 	return name + " · " + from.UTC().Format("2006-01-02") + " to " + to.UTC().Format("2006-01-02")
 }
 
+// csvSafe stops a spreadsheet from running a cell as a formula. Labels carry names typed by
+// visitors and staff, and a name that starts with = + - @ (or a tab / carriage return) is
+// executed by Excel and Sheets when the export is opened. The leading apostrophe is the
+// standard neutraliser and is not displayed by either.
+func csvSafe(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	}
+	return value
+}
+
 func renderCSV(headers []string, rows []Row) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
@@ -73,7 +88,7 @@ func renderCSV(headers []string, rows []Row) ([]byte, error) {
 		return nil, fmt.Errorf("write csv header: %w", err)
 	}
 	for _, row := range rows {
-		line := []string{row.Bucket, row.Label, number(row.Value)}
+		line := []string{csvSafe(row.Bucket), csvSafe(row.Label), number(row.Value)}
 		if err := writer.Write(line); err != nil {
 			return nil, fmt.Errorf("write csv row: %w", err)
 		}

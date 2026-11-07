@@ -28,13 +28,26 @@ func NewActiveGateMiddleware(svc *Service) *ActiveGateMiddleware {
 	return &ActiveGateMiddleware{svc: svc}
 }
 
+// gateExit names the routes that must stay reachable from a bad gate session. It matches whole
+// path segments under the API prefix: a substring test would also wave through any future route
+// that merely contains "/gates" (a report called /reports/gates-summary, say) and skip the
+// revalidation that revokes a guard.
+func gateExit(path string) bool {
+	const api = "/api/v1/"
+	rest, ok := strings.CutPrefix(path, api)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(rest, "auth/") || rest == "gates" || strings.HasPrefix(rest, "gates/")
+}
+
 func (m *ActiveGateMiddleware) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A guard whose gate was disabled must still be able to reach the picker, end the
 		// shift, or sign out. Those are the exits from a bad session; blocking them would turn
 		// a disabled gate into a locked console.
 		path := r.URL.Path
-		if strings.Contains(path, "/auth/") || strings.Contains(path, "/gates") {
+		if gateExit(path) {
 			next.ServeHTTP(w, r)
 			return
 		}

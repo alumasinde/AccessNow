@@ -10,6 +10,13 @@ type Tenant struct {
 	Timezone string `db:"timezone"`
 }
 
+type Site struct {
+	ID       int64  `db:"id"`
+	TenantID int64  `db:"tenant_id"`
+	Name     string `db:"name"`
+	Timezone string `db:"timezone"`
+}
+
 type User struct {
 	ID                 int64      `db:"id"`
 	TenantID           int64      `db:"tenant_id"`

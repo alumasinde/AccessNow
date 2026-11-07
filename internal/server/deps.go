@@ -242,7 +242,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		Guard:        guard,
 		Backlog:      events.NewBacklog(relay, backlogEvery),
 		Delivery:     notifications.NewDeliveryLoop(notificationsSvc, sweepEvery),
-		Auth:         auth.NewHandler(authSvc, cfg),
+		Auth:         auth.NewHandler(authSvc, cfg, accessSvc),
 		Gates:        gates.NewHandler(gateSvc),
 		Passes:       passes.NewHandler(passSvc),
 		Movements:    movements.NewHandler(movementsSvc),

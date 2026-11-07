@@ -32,11 +32,17 @@ func newValidator() *validator.Validate {
 // Decode reads the body, refuses unknown keys so a typo in a client cannot silently
 // drop a field, then validates the DTO.
 func Decode(r *http.Request, dst any) error {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	// MaxBytesReader fails loudly past the cap. io.LimitReader would silently cut the body at
+	// 1 MiB and report it as malformed JSON, which hides an oversized upload.
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		if errors.Is(err, io.EOF) {
 			return errs.Invalid("request body is required")
+		}
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return errs.Invalid("request body is too large")
 		}
 		var typeErr *json.UnmarshalTypeError
 		if errors.As(err, &typeErr) {
@@ -48,6 +54,10 @@ func Decode(r *http.Request, dst any) error {
 				errs.InvalidField(key, "unknown field"))
 		}
 		return errs.Invalid("request body is not valid JSON")
+	}
+	// A second JSON value after the first is not part of any contract here.
+	if decoder.More() {
+		return errs.Invalid("request body must hold a single JSON value")
 	}
 	return Validate(dst)
 }
