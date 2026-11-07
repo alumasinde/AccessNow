@@ -32,6 +32,9 @@ func TestEveryMountedHandlerIsBuilt(t *testing.T) {
 		{"Material", deps.Material != nil},
 		{"Vehicle", deps.Vehicle != nil},
 		{"Staff", deps.Staff != nil},
+		{"Contractor", deps.Contractor != nil},
+		{"Scanning", deps.Scanning != nil},
+		{"RollCall", deps.RollCall != nil},
 		{"Approval", deps.Approval != nil},
 		{"Notifications", deps.Notifications != nil},
 	} {

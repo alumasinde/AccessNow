@@ -26,21 +26,30 @@ type Service struct {
 	relay    events.Relay
 	screener Screener
 	policy   Policy
-	ledger   Ledger
+	// eligible is the module's own rules about its own passes, asked before the rulebook
+	// because a waiver cannot resurrect paperwork that has expired.
+	eligible Eligibility
+	// tokens is the badge a device read, resolved before anything is decided because the token
+	// is what names the pass. An unbound one refuses token reads and leaves pass numbers alone.
+	tokens Tokens
+	ledger Ledger
 }
 
 // relay is the outbox drain. It is a dependency rather than a goroutine so a scan's
 // reactions finish before the response goes out, and a failure never costs a movement.
 // screener is the list a barrier consults before it opens; nil means the site does not
 // screen at all, which is how the gate keeps working with the module switched off. policy is
-// the tenant's own rulebook, and nil is the same promise for the module that owns it. ledger
-// is the book kept of a replayed offline batch, and nil is that same promise a third time:
-// the queue still lands, nobody files it.
+// the tenant's own rulebook, and nil is the same promise for the module that owns it. eligible
+// is the rule a module keeps about its own passes, and an unbound one has no opinion. tokens
+// is the badge a device read, and an unbound one still takes a pass number typed at the desk.
+// ledger is the book kept of a replayed offline batch, and nil is that same promise a fifth
+// time: the queue still lands, nobody files it.
 func NewService(pool *sqlx.DB, repo *Repository, passRepo *passes.Repository, chain audit.Writer,
 	bus events.Publisher, relay events.Relay, screener Screener, policy Policy,
-	ledger Ledger) *Service {
+	eligible Eligibility, tokens Tokens, ledger Ledger) *Service {
 	return &Service{pool: pool, repo: repo, passes: passRepo, chain: chain, events: bus,
-		relay: relay, screener: screener, policy: policy, ledger: ledger}
+		relay: relay, screener: screener, policy: policy, eligible: eligible, tokens: tokens,
+		ledger: ledger}
 }
 
 // Scan is the whole gate decision: window, status and gate category are checked here, the
@@ -52,10 +61,19 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 	if scan.Direction != DirectionIn && scan.Direction != DirectionOut {
 		return Outcome{}, errs.Invalid("direction must be in or out")
 	}
-	pass, err := s.loadPass(ctx, scope, scan)
+	read, err := s.resolve(ctx, scope, scan)
 	if err != nil {
 		return Outcome{}, err
 	}
+	if read.refusal != "" {
+		// A token nobody can resolve never becomes a movement: there is no pass to write it
+		// against. The read is still filed, because a refusal at a barrier is what the scan log
+		// exists to explain afterwards.
+		outcome := Outcome{Result: ResultDenied, Reason: deny(read.refusal)}
+		s.attempt(ctx, scope, scan, read, outcome)
+		return outcome, nil
+	}
+	pass := read.pass
 
 	call := s.decide(ctx, scope, pass, scan)
 
@@ -72,11 +90,73 @@ func (s *Service) Scan(ctx context.Context, scope tenancy.Scope, scan Scan) (Out
 		}, nil
 	}
 	s.note(ctx, scope, pass, call, movement)
-	s.drain(ctx, scope)
-	return Outcome{
+	outcome := Outcome{
 		Movement: movement, Result: call.result, Reason: call.reason,
 		PassNo: pass.PassNo, Status: pass.Status,
-	}, nil
+	}
+	s.attempt(ctx, scope, scan, read, outcome)
+	s.drain(ctx, scope)
+	return outcome, nil
+}
+
+// resolve names the pass: by id, by number, or through a token a device read. A token that
+// cannot be honoured comes back as a refusal rather than an error, so the guard gets a red light
+// and a sentence instead of a 500 his tablet cannot show.
+func (s *Service) resolve(ctx context.Context, scope tenancy.Scope, scan Scan) (presented, error) {
+	if scan.Token == "" {
+		pass, err := s.loadPass(ctx, scope, scan)
+		return presented{pass: pass}, err
+	}
+	verdict, err := s.tokens.Resolve(ctx, TokenQuery{
+		TenantID: scope.TenantID, SiteID: scope.SiteID, GateID: scope.GateID,
+		GateSessionID: scope.GateShiftID, ActorUserID: scope.UserID,
+		DeviceID: scope.DeviceID, Token: scan.Token, Input: scan.Input,
+		At: time.Now().UTC(),
+	})
+	if err != nil {
+		logging.From(ctx).ErrorContext(ctx, "read the token register", "error", err)
+		return presented{input: scan.Input, refusal: "the token register could not be read"}, nil
+	}
+	read := presented{tokenID: verdict.TokenID, input: firstOf(verdict.Input, scan.Input)}
+	if verdict.Refusal != "" {
+		read.refusal = verdict.Refusal
+		return read, nil
+	}
+	pass, err := s.passes.ByID(ctx, scope.TenantID, verdict.PassID)
+	if err != nil {
+		if errs.CodeOf(err) == errs.CodeNotFound {
+			read.refusal = "the pass behind that token is not on file"
+			return read, nil
+		}
+		return presented{}, err
+	}
+	read.pass = pass
+	return read, nil
+}
+
+// attempt files the raw read. It runs after the guard already has his colour, so a failure here
+// is logged and never rewrites the answer.
+func (s *Service) attempt(ctx context.Context, scope tenancy.Scope, scan Scan,
+	read presented, outcome Outcome) {
+	if read.tokenID == 0 && scan.Token == "" {
+		return
+	}
+	at := outcome.Movement.OccurredAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	err := s.tokens.Record(ctx, Attempt{
+		TenantID: scope.TenantID, SiteID: scope.SiteID, GateID: scope.GateID,
+		GateSessionID: scope.GateShiftID, ActorUserID: scope.UserID,
+		DeviceID: scope.DeviceID, Input: read.input, Token: scan.Token, Plate: scan.Plate,
+		Direction: scan.Direction, Result: outcome.Result, Reason: outcome.Reason,
+		PassID: read.pass.ID, TokenID: read.tokenID, MovementID: outcome.Movement.ID,
+		PassNo: read.pass.PassNo, OccurredAt: at, IdempotencyKey: scan.IdempotencyKey,
+	})
+	if err != nil {
+		logging.From(ctx).ErrorContext(ctx, "record scan attempt",
+			"pass_no", read.pass.PassNo, "error", err)
+	}
 }
 
 // judgement is the gate's answer before any of it is written down: one colour, one line, and
@@ -165,6 +245,14 @@ func (s *Service) decide(ctx context.Context, scope tenancy.Scope, pass passes.P
 		return call
 	}
 
+	// A module's own pass can carry rules of its own - a contractor's rota, the expiry date on
+	// the permit that lets them on site - and they are asked before the tenant's rulebook,
+	// because rule.override waives a policy and does not resurrect paperwork.
+	if reason := s.moduleRefusal(ctx, scope, pass, scan); reason != "" {
+		call.result, call.reason = ResultDenied, reason
+		return call
+	}
+
 	call.policy, call.query = s.rulesFor(ctx, scope, pass, scan)
 	switch call.policy.Result {
 	case ResultDenied:
@@ -182,6 +270,23 @@ func (s *Service) decide(ctx context.Context, scope tenancy.Scope, pass passes.P
 		call.result, call.reason = ResultDenied, reason
 	}
 	return call
+}
+
+// moduleRefusal is the question only the module that issued the pass can answer.
+func (s *Service) moduleRefusal(ctx context.Context, scope tenancy.Scope, pass passes.Pass,
+	scan Scan) string {
+	if s.eligible == nil {
+		return ""
+	}
+	reason, err := s.eligible.Check(ctx, eligibilityQueryOf(scope, pass, scan))
+	if err != nil {
+		logging.From(ctx).ErrorContext(ctx, "pass eligibility", "pass_no", pass.PassNo, "error", err)
+		return deny("the pass's own rules could not be read")
+	}
+	if reason == "" {
+		return ""
+	}
+	return deny(reason)
 }
 
 // rulesFor asks the tenant's rulebook, and gives back the question it was asked so the

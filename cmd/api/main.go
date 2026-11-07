@@ -48,6 +48,14 @@ func run() error {
 	// out to a gateway, since a message that waits for the next badge is a message late.
 	go deps.Backlog.Run(ctx)
 	go deps.Delivery.Run(ctx)
+	// A scheduled export has no request to ride: the loop is what notices its moment passed.
+	go deps.ReportsLoop.Run(ctx)
+	// Webhooks are a queue like notifications: the gate scan's event is written, and this loop
+	// is what turns it into a request to a tenant's system.
+	go deps.WebhooksLoop.Run(ctx)
+	// An HR or ERP sync is the same shape: the desk files a job, and this loop is what calls the
+	// remote system, links what came back and records the outcome.
+	go deps.SyncLoop.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

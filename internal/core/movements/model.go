@@ -45,10 +45,16 @@ const (
 // Scan is one gate decision request: a guard, a gate from the session or the device, and
 // the pass either by id or by the number printed on it.
 type Scan struct {
-	PassID         int64
-	PassNo         string
-	Direction      Direction
-	Source         Source
+	PassID    int64
+	PassNo    string
+	Direction Direction
+	Source    Source
+	// Token is the secret a reader produced, when one did. A token names the pass, so a scan
+	// carrying one needs no pass_no; a scan carrying neither is a pass number typed at the desk
+	// and works exactly as it always did.
+	Token string
+	// Input is the kind of reader: qr, nfc, rfid, barcode, plate, manual, face, other.
+	Input          string
 	Reason         string
 	IdempotencyKey string
 	SubjectName    string

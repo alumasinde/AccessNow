@@ -52,6 +52,9 @@ var subscribedKeys = []string{
 	// The offline ledger. A batch that came back with arguments on it is the one thing a
 	// supervisor has to do about a tablet that kept working without the server.
 	"sync.conflicts_found",
+	// A scheduled export finished. Reports publishes it with its own name, row count and
+	// recipients; the catalogue row for the key is seeded, so the notice has words already.
+	"report.ready",
 }
 
 // maxAttempts is the retry budget one notice gets before it stops and shows its error. It is

@@ -18,10 +18,16 @@ import (
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/approval"
 	"accessnow/internal/modules/blocklist"
+	"accessnow/internal/modules/compliance"
+	"accessnow/internal/modules/contractor"
+	"accessnow/internal/modules/integrations"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
 	"accessnow/internal/modules/offline"
+	"accessnow/internal/modules/reports"
+	"accessnow/internal/modules/rollcall"
 	"accessnow/internal/modules/rules"
+	"accessnow/internal/modules/scanning"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
@@ -63,11 +69,17 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 		material.Register(r, deps.Material, deps.Guard)
 		vehicle.Register(r, deps.Vehicle, deps.Guard)
 		staff.Register(r, deps.Staff, deps.Guard)
+		contractor.Register(r, deps.Contractor, deps.Guard)
+		scanning.Register(r, deps.Scanning, deps.Guard)
+		rollcall.Register(r, deps.RollCall, deps.Guard)
 		approval.Register(r, deps.Approval, deps.Guard)
 		blocklist.Register(r, deps.Blocklist, deps.Guard)
 		rules.Register(r, deps.Rules, deps.Guard)
 		offline.Register(r, deps.Offline, deps.Guard)
 		notifications.Register(r, deps.Notifications, deps.Guard)
+		reports.Register(r, deps.Reports, deps.Guard)
+		compliance.Register(r, deps.Compliance, deps.Guard)
+		integrations.Register(r, deps.Integrations, deps.Guard)
 
 		r.Route("/gate", func(r chi.Router) {
 			r.Use(httprate.LimitBy(cfg.ScanRate, time.Minute, httprate.KeyByIP))

@@ -31,7 +31,13 @@ type Handler func(ctx context.Context, e Event) error
 
 // Registry is the subscriber list. Wiring happens in internal/server, the only layer
 // allowed to know Core and a module at the same time.
-type Registry struct{ handlers map[string][]Handler }
+type Registry struct {
+	handlers map[string][]Handler
+	// any is every event, for a subscriber whose own configuration decides what it cares
+	// about - outbound webhooks are the case: a tenant picks events at run time, not at wiring
+	// time, so the registry cannot know the key list when the process starts.
+	any []Handler
+}
 
 func NewRegistry() *Registry { return &Registry{handlers: make(map[string][]Handler)} }
 
@@ -41,6 +47,13 @@ func NewRegistry() *Registry { return &Registry{handlers: make(map[string][]Hand
 func (r *Registry) On(eventKey string, h Handler) {
 	r.handlers[eventKey] = append(r.handlers[eventKey], h)
 }
+
+// OnAny subscribes a handler to every event. It is deliberately separate from On: a module
+// that wants everything has to say so, and the relay stops settling unsubscribed keys as soon
+// as one exists, because with an any-handler nothing is unsubscribed.
+func (r *Registry) OnAny(h Handler) { r.any = append(r.any, h) }
+
+func (r *Registry) hasAny() bool { return len(r.any) > 0 }
 
 func (r *Registry) keys() []string {
 	keys := make([]string, 0, len(r.handlers))
@@ -114,7 +127,7 @@ func (d *Dispatcher) Relay(ctx context.Context, tenantID int64) error {
 // a decision taken at the desk would wait for the next badge to be scanned before anything
 // reacted to it.
 func (d *Dispatcher) Drain(ctx context.Context) error {
-	if len(d.reg.keys()) == 0 {
+	if len(d.reg.keys()) == 0 && !d.reg.hasAny() {
 		return nil
 	}
 	const query = `SELECT DISTINCT tenant_id FROM domain_events WHERE status = 'pending'`
@@ -135,6 +148,11 @@ func (d *Dispatcher) Drain(ctx context.Context) error {
 
 func (d *Dispatcher) run(ctx context.Context, e Event) error {
 	for _, h := range d.reg.handlers[e.EventKey] {
+		if err := h(ctx, e); err != nil {
+			return err
+		}
+	}
+	for _, h := range d.reg.any {
 		if err := h(ctx, e); err != nil {
 			return err
 		}
@@ -175,16 +193,31 @@ func (s stored) event() (Event, error) {
 // connections. keys is passed to sqlx.In as one argument so it expands into the IN list
 // rather than binding one key per placeholder.
 func (d *Dispatcher) pending(ctx context.Context, tenantID int64, keys []string) ([]stored, error) {
-	const query = `
+	query := `
 		SELECT id, tenant_id, event_key, aggregate_type, COALESCE(aggregate_id, 0) AS aggregate_id,
 		       COALESCE(pass_id, 0) AS pass_id, COALESCE(site_id, 0) AS site_id,
 		       COALESCE(gate_id, 0) AS gate_id, COALESCE(actor_user_id, 0) AS actor_user_id,
 		       COALESCE(dedupe_key, '') AS dedupe_key, payload
 		FROM   domain_events
-		WHERE  tenant_id = ? AND status = 'pending' AND event_key IN (?)
+		WHERE  tenant_id = ? AND status = 'pending'
+		@@KEYS@@
 		ORDER  BY id
 		LIMIT  ?`
-	expanded, args, err := sqlx.In(query, tenantID, keys, relayLimit)
+	args := []any{tenantID}
+	if len(keys) > 0 {
+		query = strings.Replace(query, "@@KEYS@@", "AND event_key IN (?)", 1)
+		expanded, expandedArgs, err := sqlx.In(query, append(args, keys, relayLimit)...)
+		if err != nil {
+			return nil, fmt.Errorf("expand event keys: %w", err)
+		}
+		var rows []stored
+		if err := d.pool.SelectContext(ctx, &rows, d.pool.Rebind(expanded), expandedArgs...); err != nil {
+			return nil, fmt.Errorf("read pending events: %w", err)
+		}
+		return rows, nil
+	}
+	query = strings.Replace(query, "@@KEYS@@", "", 1)
+	expanded, args, err := sqlx.In(query, append(args, relayLimit)...)
 	if err != nil {
 		return nil, fmt.Errorf("expand event keys: %w", err)
 	}
@@ -214,6 +247,10 @@ func (d *Dispatcher) mark(ctx context.Context, id int64, status, reason string) 
 // schema already reserves for exactly this: the event is on the record, it just has
 // nobody listening yet.
 func (d *Dispatcher) settle(ctx context.Context, tenantID int64, keys []string) (int64, error) {
+	if d.reg.hasAny() {
+		// Every event now has somebody to read it, so none of them is unsubscribed.
+		return 0, nil
+	}
 	const query = `
 		UPDATE domain_events
 		SET    status = 'no_subscriber'

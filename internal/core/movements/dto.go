@@ -6,8 +6,13 @@ import "time"
 // come from the device token and the session, so a stolen tablet cannot log at a
 // gate it was never bolted to.
 type ScanRequest struct {
-	PassNo         string     `json:"pass_no" validate:"omitempty,max=64"`
-	PassID         int64      `json:"pass_id" validate:"omitempty,gt=0"`
+	PassNo string `json:"pass_no" validate:"omitempty,max=64"`
+	PassID int64  `json:"pass_id" validate:"omitempty,gt=0"`
+	// Token is what a reader produced. It is the pass, for a device that can read one, and it
+	// is hashed and matched by the scanning module rather than here.
+	Token string `json:"token" validate:"omitempty,max=256"`
+	// Input is which reader spoke. Empty means a QR code, because that is what a tablet has.
+	Input          string     `json:"input" validate:"omitempty,oneof=qr barcode rfid nfc plate manual face other"`
 	Direction      string     `json:"direction" validate:"required,oneof=in out"`
 	Source         string     `json:"source" validate:"omitempty,oneof=scan manual api camera offline_sync"`
 	Reason         string     `json:"reason" validate:"omitempty,max=512"`
@@ -32,8 +37,9 @@ func (req ScanRequest) toScan() Scan {
 		at = *req.OccurredAt
 	}
 	return Scan{
-		PassID: req.PassID, PassNo: req.PassNo, Direction: Direction(req.Direction),
-		Source: Source(req.Source), Reason: req.Reason, IdempotencyKey: req.IdempotencyKey,
+		PassID: req.PassID, PassNo: req.PassNo, Token: req.Token, Input: req.Input,
+		Direction: Direction(req.Direction),
+		Source:    Source(req.Source), Reason: req.Reason, IdempotencyKey: req.IdempotencyKey,
 		SubjectName: req.SubjectName, Plate: req.Plate, OccurredAt: at,
 		DeviceUUID: firstOf(req.DeviceUUID, req.IdempotencyKey), Override: req.Override,
 	}

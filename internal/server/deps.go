@@ -14,10 +14,16 @@ import (
 	"accessnow/internal/core/passes"
 	"accessnow/internal/modules/approval"
 	"accessnow/internal/modules/blocklist"
+	"accessnow/internal/modules/compliance"
+	"accessnow/internal/modules/contractor"
+	"accessnow/internal/modules/integrations"
 	"accessnow/internal/modules/material"
 	"accessnow/internal/modules/notifications"
 	"accessnow/internal/modules/offline"
+	"accessnow/internal/modules/reports"
+	"accessnow/internal/modules/rollcall"
 	"accessnow/internal/modules/rules"
+	"accessnow/internal/modules/scanning"
 	"accessnow/internal/modules/staff"
 	"accessnow/internal/modules/vehicle"
 	"accessnow/internal/modules/visitor"
@@ -42,25 +48,39 @@ const backlogEvery = 5 * time.Second
 // that dials a provider on every tick is a tenant paying for a burst.
 const sweepEvery = 10 * time.Second
 
+// reportEvery is how often a scheduled export is checked. Half a minute is well inside the
+// minute a schedule can miss, and the query behind it is one indexed range read.
+const reportEvery = 30 * time.Second
+
 // Deps is the assembled application: one guard bundle and the handlers the router mounts.
 type Deps struct {
-	Guard     router.Guard
-	Backlog   *events.Backlog
-	Delivery  *notifications.DeliveryLoop
-	Auth      *auth.Handler
-	Gates     *gates.Handler
-	Passes    *passes.Handler
-	Movements *movements.Handler
-	Visitor   *visitor.Handler
-	Material  *material.Handler
-	Vehicle   *vehicle.Handler
-	Staff     *staff.Handler
-	Approval  *approval.Handler
-	Blocklist *blocklist.Handler
-	Rules     *rules.Handler
-	Offline   *offline.Handler
+	Guard        router.Guard
+	Backlog      *events.Backlog
+	Delivery     *notifications.DeliveryLoop
+	Auth         *auth.Handler
+	Gates        *gates.Handler
+	Passes       *passes.Handler
+	Movements    *movements.Handler
+	Visitor      *visitor.Handler
+	Material     *material.Handler
+	Vehicle      *vehicle.Handler
+	Staff        *staff.Handler
+	Contractor   *contractor.Handler
+	Scanning     *scanning.Handler
+	RollCall     *rollcall.Handler
+	Approval     *approval.Handler
+	Blocklist    *blocklist.Handler
+	Rules        *rules.Handler
+	Offline      *offline.Handler
+	Reports      *reports.Handler
+	Compliance   *compliance.Handler
+	Integrations *integrations.Handler
 
 	Notifications *notifications.Handler
+
+	ReportsLoop  *reports.Loop
+	WebhooksLoop *integrations.Loop
+	SyncLoop     *integrations.SyncLoop
 }
 
 func Build(pool *sqlx.DB, cfg config.Config) *Deps {
@@ -97,15 +117,36 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// a replayed queue that nobody files still lands, row for row, exactly as it did before this
 	// module existed.
 	ledger := movements.NewLedgerGuard()
+	// Eligibility is the seam a module answers its own passes through, and an unbound one has
+	// no opinion: a tenant without contractors is judged on the rules Core has always owned.
+	eligibility := movements.NewEligibilityGuard()
+	// The token seam resolves what a reader produced into the pass it names. It starts empty
+	// like the four above, because Core has to exist before the module that answers it.
+	tokens := movements.NewTokenGuard()
 	passSvc := passes.NewService(pool, passRepo, numbers, chain, bus, flow)
 	movementsSvc := movements.NewService(pool, movements.NewRepository(pool), passRepo, chain,
-		bus, relay, screen, policy, ledger)
+		bus, relay, screen, policy, eligibility, tokens, ledger)
 	visitorSvc := visitor.NewService(pool, visitor.NewRepository(pool), authRepo,
 		passSvc, passRepo, movementsSvc, bus)
 	materialSvc := material.NewService(pool, material.NewRepository(pool), passSvc, passRepo,
 		bus, chain)
 	vehicleSvc := vehicle.NewService(pool, vehicle.NewRepository(pool), passSvc, passRepo, bus)
 	staffSvc := staff.NewService(pool, staff.NewRepository(pool), passSvc, passRepo, bus)
+	// A contractor's rota and the expiry of the permit that lets them on site are its own
+	// facts, so the module answers for them at the barrier rather than Core learning what a
+	// contractor is.
+	contractorSvc := contractor.NewService(pool, contractor.NewRepository(pool), passSvc,
+		passRepo, bus, chain)
+	eligibility.Bind(contractorSvc)
+	// A badge is a pass in a form a reader can take, so the scanning module hands Core one
+	// already-resolved pass and keeps the hashes, the uses and the raw log to itself.
+	scanningSvc := scanning.NewService(pool, scanning.NewRepository(pool), passRepo,
+		accessSvc, chain, bus)
+	tokens.Bind(scanningSvc)
+	// A roll-call freezes Core's open movements into its own roster, so an incident is a
+	// snapshot that does not change under a warden's feet, and no other module has to know an
+	// alarm went off.
+	rollcallSvc := rollcall.NewService(pool, rollcall.NewRepository(pool), chain, bus)
 	approvalSvc := approval.NewService(pool, approval.NewRepository(pool), passSvc, chain, bus, accessSvc)
 	flow.Bind(approvalSvc)
 	blocklistSvc := blocklist.NewService(pool, blocklist.NewRepository(pool), accessSvc, bus,
@@ -123,6 +164,18 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// in this wiring ever holds a secret it could log.
 	notificationsSvc := notifications.NewService(pool, notifications.NewRepository(pool),
 		accessSvc, chain, nil)
+	// Reports reads the registers and never writes them; the module is the only place a
+	// tenant's export definitions and schedules live.
+	reportsSvc := reports.NewService(pool, reports.NewRepository(pool), accessSvc, bus, chain)
+	// Compliance is the tools around the trail Core already writes: retention, holds, the purge
+	// ledger and chain verification. It has no worker, because a purge is a deliberate act.
+	complianceSvc := compliance.NewService(pool, compliance.NewRepository(pool), accessSvc, bus,
+		chain)
+	// Integrations is the one module that wants every event rather than a list of keys: a
+	// tenant's webhook subscriptions are edited at run time, not when the process starts.
+	integrationsSvc := integrations.NewService(pool, integrations.NewRepository(pool), accessSvc,
+		bus, chain)
+	registry.OnAny(integrationsSvc.OnEvent)
 
 	// All four reactions key off the same scan: the gate decides, the module's own row
 	// follows. A module switched off for a tenant hides its surface, not these handlers:
@@ -142,6 +195,14 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	for _, eventKey := range approval.SettledKeys() {
 		registry.On(eventKey, approvalSvc.OnPassSettled)
 	}
+	// A pass that becomes usable gets a badge without the desk minting one, and a pass that
+	// ends takes its badges with it. Both sides are idempotent: the relay delivers at least
+	// once, and a badge left on a dead pass is the one failure this module must not allow.
+	registry.On("pass.approved", scanningSvc.OnPassApproved)
+	registry.On("pass.issued", scanningSvc.OnPassIssued)
+	for _, eventKey := range scanning.SettledKeys() {
+		registry.On(eventKey, scanningSvc.OnPassSettled)
+	}
 
 	// Notifications is the one reactor that subscribes to a long list of keys rather than to
 	// the scan, because its whole job is what everybody else's events mean to a human. The
@@ -159,22 +220,34 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	}
 
 	return &Deps{
-		Guard:     guard,
-		Backlog:   events.NewBacklog(relay, backlogEvery),
-		Delivery:  notifications.NewDeliveryLoop(notificationsSvc, sweepEvery),
-		Auth:      auth.NewHandler(authSvc, cfg),
-		Gates:     gates.NewHandler(gateSvc),
-		Passes:    passes.NewHandler(passSvc),
-		Movements: movements.NewHandler(movementsSvc),
-		Visitor:   visitor.NewHandler(visitorSvc),
-		Material:  material.NewHandler(materialSvc),
-		Vehicle:   vehicle.NewHandler(vehicleSvc),
-		Staff:     staff.NewHandler(staffSvc),
-		Approval:  approval.NewHandler(approvalSvc),
-		Blocklist: blocklist.NewHandler(blocklistSvc),
-		Rules:     rules.NewHandler(rulesSvc),
-		Offline:   offline.NewHandler(offlineSvc),
+		Guard:        guard,
+		Backlog:      events.NewBacklog(relay, backlogEvery),
+		Delivery:     notifications.NewDeliveryLoop(notificationsSvc, sweepEvery),
+		Auth:         auth.NewHandler(authSvc, cfg),
+		Gates:        gates.NewHandler(gateSvc),
+		Passes:       passes.NewHandler(passSvc),
+		Movements:    movements.NewHandler(movementsSvc),
+		Visitor:      visitor.NewHandler(visitorSvc),
+		Material:     material.NewHandler(materialSvc),
+		Vehicle:      vehicle.NewHandler(vehicleSvc),
+		Staff:        staff.NewHandler(staffSvc),
+		Contractor:   contractor.NewHandler(contractorSvc),
+		Scanning:     scanning.NewHandler(scanningSvc),
+		RollCall:     rollcall.NewHandler(rollcallSvc),
+		Approval:     approval.NewHandler(approvalSvc),
+		Blocklist:    blocklist.NewHandler(blocklistSvc),
+		Rules:        rules.NewHandler(rulesSvc),
+		Offline:      offline.NewHandler(offlineSvc),
+		Reports:      reports.NewHandler(reportsSvc),
+		Compliance:   compliance.NewHandler(complianceSvc),
+		Integrations: integrations.NewHandler(integrationsSvc),
 
 		Notifications: notifications.NewHandler(notificationsSvc),
+
+		ReportsLoop:  reports.NewLoop(reportsSvc, reportEvery),
+		WebhooksLoop: integrations.NewLoop(integrationsSvc, sweepEvery),
+		// An HR or ERP exchange is a queue like the other two: the shortest cadence a system
+		// may ask for is a minute, so the tick is a minute.
+		SyncLoop: integrations.NewSyncLoop(integrationsSvc, time.Minute),
 	}
 }

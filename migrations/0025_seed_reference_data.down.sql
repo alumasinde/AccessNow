@@ -8,15 +8,15 @@ WHERE definition_key IN ('gate_movements_daily', 'visitor_log', 'host_activity',
                          'material_outstanding', 'material_exceptions', 'outpass_register', 'contractor_expiry',
                          'blocklist_hits', 'approval_latency', 'gate_utilisation', 'guard_activity', 'audit_summary');
 
+-- Every event row names a module by foreign key, so the catalogue cannot go while any is left.
+-- This removes the keys seeded here and the ones later seeds added against them
+-- (visit.no_show, material.overdue, material.disputed arrive in 0031, for instance); deleting
+-- only the original list leaves the module delete refused and a rollback dirty halfway through.
 DELETE FROM notification_events
-WHERE event_key IN ('visit.host_approval_needed', 'visit.approved', 'visit.rejected', 'visit.arrived',
-                    'visit.departed', 'visit.expired', 'preauth.invitation_sent', 'vehicle.overstaying',
-                    'vehicle.exited', 'material.approval_needed', 'material.released', 'material.item_overdue',
-                    'material.exception', 'outpass.approval_needed', 'outpass.overdue', 'outpass.unreturned',
-                    'contractor.document_expiring', 'contractor.pass_blocked', 'blocklist.watched_hit',
-                    'blocklist.denied_entry', 'approval.awaiting_me', 'approval.escalated', 'gate.override_used',
-                    'shift.handover_due', 'rollcall.incident_started', 'rollcall.still_unaccounted',
-                    'report.ready', 'sync.conflicts_found', 'device.offline');
+WHERE module_key IN ('core', 'visitor_management', 'vehicle_tracking', 'material_logistics', 'staff_outpass',
+                     'contractor_access', 'qr_scanning', 'approval_workflow', 'rules_policy', 'blocklist_watchlist',
+                     'notifications', 'offline_gate', 'emergency_rollcall', 'reports_exports', 'audit_compliance',
+                     'integrations_api');
 
 DELETE FROM outpass_reasons
 WHERE reason_key IN ('personal_errand', 'medical_appointment', 'family_emergency', 'official_business',
