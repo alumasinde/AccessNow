@@ -11,9 +11,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +72,8 @@ var syncCredentialName = regexp.MustCompile(`^ACCESSNOW_SYNC_[A-Z0-9_]{1,64}$`)
 
 var syncFieldName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
+var syncDatabaseName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
+
 // syncKinds is chk_external_systems_kind. The module can hold a configuration for any of them;
 // what it can actually exchange is the entity list below.
 var syncKinds = map[string]bool{
@@ -118,6 +122,8 @@ type ExternalSystem struct {
 // systemOptions is the JSON column that holds the choices the schema has no column for.
 type systemOptions struct {
 	Entity          string `json:"entity"`
+	Provider        string `json:"provider,omitempty"`
+	Database        string `json:"database,omitempty"`
 	Path            string `json:"path,omitempty"`
 	ExternalIDField string `json:"external_id_field,omitempty"`
 	CursorField     string `json:"cursor_field,omitempty"`
@@ -137,6 +143,13 @@ func (o systemOptions) externalField() string {
 		return "id"
 	}
 	return o.ExternalIDField
+}
+
+func (o systemOptions) provider() string {
+	if strings.TrimSpace(o.Provider) == "" {
+		return "generic"
+	}
+	return o.Provider
 }
 
 func (o systemOptions) timeout() time.Duration {
@@ -197,6 +210,8 @@ type ExternalSystemRequest struct {
 	SyncDirection        string            `json:"sync_direction" validate:"omitempty,oneof=in out both"`
 	SyncFrequencyMinutes *int              `json:"sync_frequency_minutes" validate:"omitempty,min=1,max=1440"`
 	EntityType           string            `json:"entity_type" validate:"omitempty,max=32"`
+	Provider             string            `json:"provider" validate:"omitempty,oneof=generic odoo"`
+	Database             string            `json:"database" validate:"omitempty,max=64"`
 	Path                 string            `json:"path" validate:"omitempty,max=255"`
 	ExternalIDField      string            `json:"external_id_field" validate:"omitempty,max=64"`
 	CursorField          string            `json:"cursor_field" validate:"omitempty,max=64"`
@@ -221,6 +236,8 @@ type ExternalSystemView struct {
 	SyncDirection        string            `json:"sync_direction"`
 	SyncFrequencyMinutes *int              `json:"sync_frequency_minutes,omitempty"`
 	EntityType           string            `json:"entity_type"`
+	Provider             string            `json:"provider"`
+	Database             string            `json:"database,omitempty"`
 	Path                 string            `json:"path"`
 	ExternalIDField      string            `json:"external_id_field"`
 	CursorField          string            `json:"cursor_field,omitempty"`
@@ -235,16 +252,14 @@ type ExternalSystemView struct {
 
 func systemView(system ExternalSystem) ExternalSystemView {
 	opts := system.SyncOptions()
-	fields := map[string]string{}
-	if strings.TrimSpace(system.FieldMap) != "" {
-		_ = json.Unmarshal([]byte(system.FieldMap), &fields)
-	}
+	fields := systemFieldMap(system)
 	return ExternalSystemView{
 		ID: system.ID, Kind: system.Kind, Name: system.Name, BaseURL: system.BaseURL,
 		AuthType: system.AuthType, CredentialsRef: system.CredentialsRef,
 		Username: system.Username, APIVersion: system.APIVersion,
 		SyncDirection: system.SyncDirection, SyncFrequencyMinutes: system.SyncFrequencyMinutes,
-		EntityType: opts.Entity, Path: opts.Path, ExternalIDField: opts.externalField(),
+		EntityType: opts.Entity, Provider: opts.provider(), Database: opts.Database,
+		Path: opts.Path, ExternalIDField: opts.externalField(),
 		CursorField: opts.CursorField, TimeoutMS: int(opts.timeout().Milliseconds()),
 		FieldMap: fields, HealthStatus: system.HealthStatus, LastSyncAt: system.LastSyncAt,
 		LastError: system.LastError, IsActive: system.IsActive, CreatedAt: system.CreatedAt,
@@ -540,6 +555,23 @@ func buildSystem(req ExternalSystemRequest, existing ExternalSystem) (ExternalSy
 		return ExternalSystem{}, errs.BadField("auth_type",
 			"must be none, basic, bearer or api_key; client_credentials and oauth2 need a token exchange this module does not implement")
 	}
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	if provider == "" {
+		provider = "generic"
+	}
+	if provider != "generic" && provider != "odoo" {
+		return ExternalSystem{}, errs.BadField("provider", "must be generic or odoo")
+	}
+	database := strings.TrimSpace(req.Database)
+	if provider == "odoo" {
+		if auth != "basic" {
+			return ExternalSystem{}, errs.BadField("auth_type",
+				"odoo sessions use basic credentials")
+		}
+		if database == "" || !syncDatabaseName.MatchString(database) {
+			return ExternalSystem{}, errs.BadField("database", "must name the Odoo database")
+		}
+	}
 	base := strings.TrimSpace(req.BaseURL)
 	if err := validSyncBaseURL(base); err != nil {
 		return ExternalSystem{}, err
@@ -550,6 +582,10 @@ func buildSystem(req ExternalSystemRequest, existing ExternalSystem) (ExternalSy
 	}
 	if !syncEntities[entity] {
 		return ExternalSystem{}, errs.BadField("entity_type", "is not an entity a sync can link")
+	}
+	if provider == "odoo" && entity != "staff" && entity != "department" {
+		return ExternalSystem{}, errs.BadField("entity_type",
+			"odoo sync supports staff and department")
 	}
 	if direction != SystemIn && !outboundEntities[entity] {
 		return ExternalSystem{}, errs.BadField("entity_type",
@@ -566,7 +602,11 @@ func buildSystem(req ExternalSystemRequest, existing ExternalSystem) (ExternalSy
 	}
 	path := strings.TrimSpace(req.Path)
 	if path == "" {
-		path = "/"
+		if provider == "odoo" {
+			path = "/web/dataset/call_kw"
+		} else {
+			path = "/"
+		}
 	}
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") || len(path) > 255 {
 		return ExternalSystem{}, errs.BadField("path", "must be an absolute path without ..")
@@ -603,8 +643,9 @@ func buildSystem(req ExternalSystemRequest, existing ExternalSystem) (ExternalSy
 				remote+": both sides must be field names")
 		}
 	}
-	rawOptions, err := json.Marshal(systemOptions{Entity: entity, Path: path,
-		ExternalIDField: externalField, CursorField: cursorField, TimeoutMS: timeout})
+	rawOptions, err := json.Marshal(systemOptions{Entity: entity, Provider: provider,
+		Database: database, Path: path, ExternalIDField: externalField,
+		CursorField: cursorField, TimeoutMS: timeout})
 	if err != nil {
 		return ExternalSystem{}, errs.Internal(fmt.Errorf("encode system options: %w", err))
 	}
@@ -877,6 +918,10 @@ func (s *Service) finish(ctx context.Context, job SyncJob, status string, seen, 
 // owning module decides what to do with it.
 func (s *Service) pull(ctx context.Context, system ExternalSystem, opts systemOptions,
 	job SyncJob, links linkUpserter) (seen, created, updated, failed int, cursor string, err error) {
+	fields := systemFieldMap(system)
+	if opts.provider() == "odoo" {
+		return s.pullOdoo(ctx, system, opts, links, fields)
+	}
 	endpoint, err := syncEndpoint(system, opts)
 	if err != nil {
 		return 0, 0, 0, 0, "", err
@@ -926,7 +971,7 @@ func (s *Service) pull(ctx context.Context, system ExternalSystem, opts systemOp
 		// internal_id is left to the module that owns the record: a sync links what the remote
 		// system has, and claiming a local row is a decision this module does not make.
 		made, changed, err := links.UpsertLink(ctx, system.TenantID, system.ID, opts.Entity,
-			external, nil, digestOf(record), now)
+			external, nil, mappedDigest(record, fields), now)
 		if err != nil {
 			return seen, created, updated, failed, cursor, err
 		}
@@ -947,6 +992,204 @@ func (s *Service) pull(ctx context.Context, system ExternalSystem, opts systemOp
 		cursor = next
 	}
 	return seen, created, updated, failed, cursor, nil
+}
+
+// pullOdoo reads an Odoo register through its session RPC. Odoo's JSON-2 surface needs an
+// API key that the demo will not mint from a password session, while the same session can call
+// search_read directly. The field map is applied to the record digest, so a change to a mapped
+// column is a change and a change to an unmapped one is not.
+func (s *Service) pullOdoo(ctx context.Context, system ExternalSystem, opts systemOptions,
+	links linkUpserter, mapped map[string]string) (
+	seen, created, updated, failed int, cursor string, err error) {
+	if opts.Database == "" {
+		return 0, 0, 0, 0, "", errs.BadField("database", "is required for an Odoo system")
+	}
+	if opts.Entity != "staff" && opts.Entity != "department" {
+		return 0, 0, 0, 0, "", errs.BadField("entity_type",
+			"Odoo sync supports staff and department")
+	}
+	if system.BaseURL == nil || strings.TrimSpace(*system.BaseURL) == "" {
+		return 0, 0, 0, 0, "", errs.BadField("base_url", "is not set on this system")
+	}
+	secret, err := syncCredential(system)
+	if err != nil {
+		return 0, 0, 0, 0, "", err
+	}
+	client := syncHTTPClient(opts.timeout())
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return 0, 0, 0, 0, "", fmt.Errorf("create Odoo session jar: %w", err)
+	}
+	client.Jar = jar
+	base := strings.TrimRight(*system.BaseURL, "/")
+	login, err := url.Parse(base + "/web/session/authenticate")
+	if err != nil {
+		return 0, 0, 0, 0, "", errs.BadField("base_url", "is not a URL")
+	}
+	var session struct {
+		UID int64 `json:"uid"`
+	}
+	if err := odooCall(ctx, client, login, "", map[string]any{
+		"db": opts.Database, "login": odooLogin(system), "password": secret,
+	}, &session); err != nil {
+		return 0, 0, 0, 0, "", fmt.Errorf("odoo login: %w", err)
+	}
+	if session.UID == 0 {
+		return 0, 0, 0, 0, "", fmt.Errorf("odoo login was refused")
+	}
+
+	endpoint, err := syncEndpoint(system, opts)
+	if err != nil {
+		return 0, 0, 0, 0, "", err
+	}
+	fields := odooFields(opts.Entity, opts.externalField(), opts.CursorField, mapped)
+	var records []json.RawMessage
+	if err := odooCall(ctx, client, endpoint, opts.Database, map[string]any{
+		"model": odooModel(opts.Entity), "method": "search_read",
+		"args": []any{[]any{}},
+		"kwargs": map[string]any{
+			"fields": fields,
+			"limit":  500,
+		},
+	}, &records); err != nil {
+		return 0, 0, 0, 0, "", fmt.Errorf("odoo search_read: %w", err)
+	}
+
+	now := s.now()
+	for _, record := range records {
+		external := recordString(record, opts.externalField())
+		if external == "" {
+			failed++
+			continue
+		}
+		made, changed, err := links.UpsertLink(ctx, system.TenantID, system.ID, opts.Entity,
+			external, nil, mappedDigest(record, mapped), now)
+		if err != nil {
+			return seen, created, updated, failed, cursor, err
+		}
+		switch {
+		case made:
+			created++
+		case changed:
+			updated++
+		}
+		seen++
+		if opts.CursorField != "" {
+			if value := recordString(record, opts.CursorField); value != "" {
+				cursor = value
+			}
+		}
+	}
+	return seen, created, updated, failed, cursor, nil
+}
+
+func odooLogin(system ExternalSystem) string {
+	if system.Username != nil && strings.TrimSpace(*system.Username) != "" {
+		return strings.TrimSpace(*system.Username)
+	}
+	return "admin"
+}
+
+func odooModel(entity string) string {
+	if entity == "department" {
+		return "hr.department"
+	}
+	return "hr.employee"
+}
+
+// odooFields asks for the mapped columns plus the identifiers the link and cursor need. The
+// extra personnel fields let a live run prove that an unmapped change does not rewrite a link.
+func odooFields(entity, external, cursorField string, mapped map[string]string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(mapped)+8)
+	add := func(field string) {
+		field = strings.TrimSpace(field)
+		if field == "" || seen[field] {
+			return
+		}
+		seen[field] = true
+		out = append(out, field)
+	}
+	add(external)
+	add(cursorField)
+	if entity == "department" {
+		add("name")
+		add("parent_id")
+		add("active")
+	} else {
+		add("name")
+		add("work_email")
+		add("department_id")
+		add("job_title")
+		add("active")
+	}
+	for remote := range mapped {
+		add(remote)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// odooCall posts one JSON-RPC call and unwraps result or error. It never puts the credential in
+// an error string: a login failure is reported without the password that produced it.
+func odooCall(ctx context.Context, client *http.Client, endpoint *url.URL, database string,
+	params map[string]any, out any) error {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "call", "params": params, "id": 1,
+	})
+	if err != nil {
+		return fmt.Errorf("encode Odoo request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(),
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build Odoo request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "AccessNow-Sync/1")
+	if database != "" {
+		request.Header.Set("X-Odoo-Database", database)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("call Odoo: %w", err)
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, syncMaxBody))
+	if err != nil {
+		return fmt.Errorf("read Odoo: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return fmt.Errorf("Odoo answered %d: %s", response.StatusCode,
+			truncate(string(payload), 300))
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+			Data    struct {
+				Message string `json:"message"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return fmt.Errorf("decode Odoo response: %w", err)
+	}
+	if envelope.Error != nil {
+		message := envelope.Error.Data.Message
+		if message == "" {
+			message = envelope.Error.Message
+		}
+		return fmt.Errorf("Odoo error: %s", truncate(message, 300))
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(envelope.Result, out); err != nil {
+		return fmt.Errorf("decode Odoo result: %w", err)
+	}
+	return nil
 }
 
 // push sends this tenant's own register to the remote system. Only entities with a stable,
@@ -1003,17 +1246,9 @@ func authorize(system ExternalSystem) (http.Header, error) {
 	if system.AuthType == "" || system.AuthType == "none" {
 		return headers, nil
 	}
-	if system.CredentialsRef == nil || strings.TrimSpace(*system.CredentialsRef) == "" {
-		return nil, errs.BadField("credentials_ref", "is required for "+system.AuthType)
-	}
-	name := *system.CredentialsRef
-	if !syncCredentialName.MatchString(name) {
-		return nil, errs.BadField("credentials_ref",
-			"must name an environment variable starting with ACCESSNOW_SYNC_")
-	}
-	secret := strings.TrimSpace(os.Getenv(name))
-	if secret == "" {
-		return nil, errs.BadField("credentials_ref", name+" is not set in the environment")
+	secret, err := syncCredential(system)
+	if err != nil {
+		return nil, err
 	}
 	switch system.AuthType {
 	case "bearer":
@@ -1031,6 +1266,22 @@ func authorize(system ExternalSystem) (http.Header, error) {
 		return nil, errs.BadField("auth_type", "is not a supported authentication type")
 	}
 	return headers, nil
+}
+
+func syncCredential(system ExternalSystem) (string, error) {
+	if system.CredentialsRef == nil || strings.TrimSpace(*system.CredentialsRef) == "" {
+		return "", errs.BadField("credentials_ref", "is required for "+system.AuthType)
+	}
+	name := *system.CredentialsRef
+	if !syncCredentialName.MatchString(name) {
+		return "", errs.BadField("credentials_ref",
+			"must name an environment variable starting with ACCESSNOW_SYNC_")
+	}
+	secret := strings.TrimSpace(os.Getenv(name))
+	if secret == "" {
+		return "", errs.BadField("credentials_ref", name+" is not set in the environment")
+	}
+	return secret, nil
 }
 
 func syncEndpoint(system ExternalSystem, opts systemOptions) (*url.URL, error) {
@@ -1139,6 +1390,38 @@ func recordString(record json.RawMessage, field string) string {
 		return number.String()
 	}
 	return ""
+}
+
+func systemFieldMap(system ExternalSystem) map[string]string {
+	fields := map[string]string{}
+	if strings.TrimSpace(system.FieldMap) != "" {
+		_ = json.Unmarshal([]byte(system.FieldMap), &fields)
+	}
+	return fields
+}
+
+// mappedDigest hashes only the remote fields the system maps. A sync link carries no copied
+// values, so the digest is where a field map has an effect: mapped changes rewrite the link,
+// unmapped changes do not.
+func mappedDigest(record json.RawMessage, fields map[string]string) string {
+	if len(fields) == 0 {
+		return digestOf(record)
+	}
+	var source map[string]json.RawMessage
+	if err := json.Unmarshal(record, &source); err != nil {
+		return digestOf(record)
+	}
+	mapped := make(map[string]json.RawMessage, len(fields))
+	for remote, local := range fields {
+		if value, ok := source[remote]; ok {
+			mapped[local] = value
+		}
+	}
+	encoded, err := json.Marshal(mapped)
+	if err != nil {
+		return digestOf(record)
+	}
+	return digestOf(encoded)
 }
 
 func digestOf(record json.RawMessage) string {

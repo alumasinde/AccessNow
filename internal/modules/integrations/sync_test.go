@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -91,6 +92,54 @@ func TestBuildSystemRefusesUnsafeTargets(t *testing.T) {
 		if _, err := buildSystem(req, ExternalSystem{}); err == nil {
 			t.Fatalf("%s should be refused", name)
 		}
+	}
+}
+
+func TestMappedDigestUsesOnlyMappedFields(t *testing.T) {
+	fields := map[string]string{"name": "full_name", "work_email": "email"}
+	base := json.RawMessage(`{"id":7,"name":"Abigail","work_email":"a@example.com","job_title":"Consultant"}`)
+	unmapped := json.RawMessage(`{"id":7,"name":"Abigail","work_email":"a@example.com","job_title":"Director"}`)
+	mapped := json.RawMessage(`{"id":7,"name":"Abigail P.","work_email":"a@example.com","job_title":"Consultant"}`)
+
+	if mappedDigest(base, fields) != mappedDigest(unmapped, fields) {
+		t.Fatal("an unmapped field must not change the record digest")
+	}
+	if mappedDigest(base, fields) == mappedDigest(mapped, fields) {
+		t.Fatal("a mapped field must change the record digest")
+	}
+}
+
+func TestBuildSystemOdooProvider(t *testing.T) {
+	req := ExternalSystemRequest{
+		Kind: "erp", Name: "Odoo", BaseURL: "https://demo.example.com",
+		AuthType: "basic", CredentialsRef: "ACCESSNOW_SYNC_ODOO", Username: "admin",
+		Provider: "odoo", Database: "demo_200", EntityType: "staff",
+		SyncDirection: "in", FieldMap: map[string]string{"name": "full_name"},
+	}
+	system, err := buildSystem(req, ExternalSystem{})
+	if err != nil {
+		t.Fatalf("valid Odoo system refused: %v", err)
+	}
+	opts := system.SyncOptions()
+	if opts.provider() != "odoo" || opts.Database != "demo_200" ||
+		opts.Path != "/web/dataset/call_kw" {
+		t.Fatalf("options = %+v, want the Odoo session endpoint and database", opts)
+	}
+
+	badDatabase := req
+	badDatabase.Database = ""
+	if _, err := buildSystem(badDatabase, ExternalSystem{}); err == nil {
+		t.Fatal("an Odoo system without a database must be refused")
+	}
+	badAuth := req
+	badAuth.AuthType = "bearer"
+	if _, err := buildSystem(badAuth, ExternalSystem{}); err == nil {
+		t.Fatal("an Odoo system without basic credentials must be refused")
+	}
+	badEntity := req
+	badEntity.EntityType = "company"
+	if _, err := buildSystem(badEntity, ExternalSystem{}); err == nil {
+		t.Fatal("an unsupported Odoo entity must be refused")
 	}
 }
 

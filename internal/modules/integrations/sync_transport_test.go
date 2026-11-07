@@ -250,3 +250,96 @@ func TestSyncClientRefusesLoopback(t *testing.T) {
 		t.Fatalf("error = %v, want a private-address refusal", err)
 	}
 }
+
+// TestPullOdooAgainstReceiver drives the Odoo provider's session login and search_read call,
+// and proves that the configured field map decides which remote edits rewrite a link.
+func TestPullOdooAgainstReceiver(t *testing.T) {
+	var login map[string]any
+	var call map[string]any
+	var callDatabase, callCookie string
+	name, title := "Abigail Peterson", "Consultant"
+	var logins int32
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/web/session/authenticate":
+			atomic.AddInt32(&logins, 1)
+			_ = json.NewDecoder(r.Body).Decode(&login)
+			http.SetCookie(w, &http.Cookie{Name: "session_id", Value: "odoo-session", Path: "/"})
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"uid":2}}`)
+		case "/web/dataset/call_kw":
+			callDatabase = r.Header.Get("X-Odoo-Database")
+			if cookie, err := r.Cookie("session_id"); err == nil {
+				callCookie = cookie.Value
+			}
+			_ = json.NewDecoder(r.Body).Decode(&call)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":[`+
+				`{"id":7,"name":%q,"work_email":"abigail@example.com",`+
+				`"department_id":[6,"Management"],"job_title":%q,"active":true}]}`,
+				name, title)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	receiver(t, srv)
+	t.Setenv("ACCESSNOW_SYNC_ODOO", "odoo-password")
+
+	system := testSystem(srv.URL)
+	system.AuthType = "basic"
+	system.Username = refName("admin")
+	system.CredentialsRef = refName("ACCESSNOW_SYNC_ODOO")
+	system.FieldMap = `{"name":"full_name","work_email":"email","department_id":"department_id"}`
+	opts := systemOptions{Entity: "staff", Provider: "odoo", Database: "demo_200",
+		Path: "/web/dataset/call_kw"}
+	store := &linkStore{}
+	job := SyncJob{ID: 3, TenantID: 1, SystemID: 7, EntityType: "staff", Direction: SystemIn}
+	service := syncTestService()
+
+	seen, created, updated, failed, _, err := service.pull(context.Background(), system, opts,
+		job, store)
+	if err != nil {
+		t.Fatalf("Odoo pull: %v", err)
+	}
+	if seen != 1 || created != 1 || updated != 0 || failed != 0 || len(store.links) != 1 {
+		t.Fatalf("seen/created/updated/failed/links = %d/%d/%d/%d/%d",
+			seen, created, updated, failed, len(store.links))
+	}
+	params, _ := login["params"].(map[string]any)
+	if params["db"] != "demo_200" || params["login"] != "admin" ||
+		params["password"] != "odoo-password" {
+		t.Fatalf("login params = %+v", params)
+	}
+	if callDatabase != "demo_200" || callCookie != "odoo-session" {
+		t.Fatalf("database=%q cookie=%q", callDatabase, callCookie)
+	}
+	callParams, _ := call["params"].(map[string]any)
+	kwargs, _ := callParams["kwargs"].(map[string]any)
+	fields, _ := kwargs["fields"].([]any)
+	if !containsField(fields, "job_title") || !containsField(fields, "department_id") {
+		t.Fatalf("requested fields = %v", fields)
+	}
+
+	title = "Director"
+	_, _, updated, _, _, err = service.pull(context.Background(), system, opts, job, store)
+	if err != nil || updated != 0 {
+		t.Fatalf("unmapped edit: updated=%d err=%v", updated, err)
+	}
+	name = "Abigail P."
+	_, _, updated, _, _, err = service.pull(context.Background(), system, opts, job, store)
+	if err != nil || updated != 1 {
+		t.Fatalf("mapped edit: updated=%d err=%v", updated, err)
+	}
+	if logins != 3 {
+		t.Fatalf("logins = %d, want one per pull", logins)
+	}
+}
+
+func containsField(fields []any, want string) bool {
+	for _, field := range fields {
+		if field == want {
+			return true
+		}
+	}
+	return false
+}

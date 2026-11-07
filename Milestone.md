@@ -108,10 +108,13 @@ Updated 2026-11-07 · 39 migration pairs · 37 Go packages · 15 module packages
   bounded ladder, buried as dead after the endpoint's budget, and switched off after twenty
   consecutive failures. **HR/ERP sync** configures an `external_systems` row (kind, direction,
   frequency, field map), authenticates from an `ACCESSNOW_SYNC_*` environment reference that is
-  never stored, and runs through `sync_jobs`: pull links each remote record with a content hash
-  so an unchanged register writes nothing, push sends staff, departments or visitor companies
-  under an `items` envelope, a cursor carries between incremental runs, and the transport
-  refuses a private address at connect time and on every redirect. **A failed run is requeued
+  never stored, and runs through `sync_jobs`: pull applies the field map to the record digest
+  (a mapped change rewrites a link, an unmapped change does not) and links each remote record
+  with a content hash so an unchanged register writes nothing. An Odoo provider uses the
+  vendor's password session and `search_read` for staff and departments; the generic path still
+  reads arrays or `items` envelopes. Push sends staff, departments or visitor companies under
+  an `items` envelope, a cursor carries between incremental runs, and the transport refuses a
+  private address at connect time and on every redirect. **A failed run is requeued
   on its own ladder** — one minute, five, twenty, four attempts in all (`0038`) — and only the
   final failure marks the job failed; the next frequency interval is not the retry.
   **Per-key rate limiting is shared**: the fixed one-minute window lives in
@@ -224,6 +227,16 @@ been carrying in ⬜ and 🟡, collected here so they can be closed one at a tim
   Go build, vet, tests and lint were run locally, and the service booted against MySQL with
   `/readyz` and `/healthz` both returning 200. The image itself was not built because the
   Docker daemon was not running.
-- ⬜ Webhooks and sync have not run against a real third-party system. The fake receiver proves
-  the wire shape; a vendor's own quirks still need one run with real credentials and a real
-  endpoint.
+- ✅ Webhooks and sync ran end to end against live external endpoints. A signed webhook test
+  reached Webhook.site and the captured HMAC verified; a pull from JSONPlaceholder linked 10
+  records; and a bearer-authenticated push delivered 2 seeded staff records to Webhook.site.
+  Demo credentials are in the ignored `.env` (`ACCESSNOW_SYNC_DEMO_TOKEN`,
+  `WEBHOOK_SECRET_ACCESSNOW_WEBHOOK_DEMO`).
+- ✅ The HR/ERP path ran against a live Odoo 20 demo ERP, not a generic receiver. Odoo's
+  `hr.employee` register returned 32 records, and the pull created 32 links with zero failures
+  using the field map `name → full_name`, `work_email → email`, `department_id → department_id`.
+  Changing Odoo's unmapped `job_title` left every link digest unchanged (`records_updated=0`);
+  changing the mapped `name` rewrote exactly one link (`records_updated=1`) and changed that
+  link's stored digest. Odoo demo credentials are in the ignored `.env`
+  (`ACCESSNOW_SYNC_ODOO_PASSWORD`); the demo database is temporary. The field map controls the
+  link digest; this module still does not copy remote field values into local rows.
