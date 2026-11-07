@@ -84,6 +84,42 @@ func (r *Repository) Claim(ctx context.Context, tenantID, formatID int64, period
 	return next, nil
 }
 
+// Format reads one tenant format by key, whatever its active flag. It is the admin read;
+// allocation uses ActiveFormat and refuses a paused series.
+func (r *Repository) Format(ctx context.Context, tenantID int64, formatKey string) (Format, error) {
+	const query = `
+		SELECT id, tenant_id, format_key, name, pattern, prefix, category_key, module_key,
+		       sequence_width, separator_char, reset_period, gap_required
+		FROM   pass_number_formats
+		WHERE  tenant_id = ? AND format_key = ?`
+	var f Format
+	err := r.q.GetContext(ctx, &f, query, tenantID, formatKey)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Format{}, errs.NotFound("pass number format " + formatKey)
+	case err != nil:
+		return Format{}, fmt.Errorf("read pass number format: %w", err)
+	default:
+		return f, nil
+	}
+}
+
+// Formats is the desk's whole numbering scheme, ordered by the key a module names so the
+// list is stable between reads.
+func (r *Repository) Formats(ctx context.Context, tenantID int64) ([]Format, error) {
+	const query = `
+		SELECT id, tenant_id, format_key, name, pattern, prefix, category_key, module_key,
+		       sequence_width, separator_char, reset_period, gap_required
+		FROM   pass_number_formats
+		WHERE  tenant_id = ?
+		ORDER  BY format_key`
+	var out []Format
+	if err := r.q.SelectContext(ctx, &out, query, tenantID); err != nil {
+		return nil, fmt.Errorf("read pass number formats: %w", err)
+	}
+	return out, nil
+}
+
 // SaveFormat creates or replaces a tenant format. Existing pass_no values are never
 // rewritten: a format change only applies to passes issued after it.
 func (r *Repository) SaveFormat(ctx context.Context, f Format) error {

@@ -412,8 +412,8 @@ func TestActionAndStagePredicates(t *testing.T) {
 	if !StageScan.StageAsked() || !StageBoth.StageAsked() {
 		t.Error("the gate walks scan and both")
 	}
-	if StageRequest.StageAsked() || StageNightly.StageAsked() {
-		t.Error("nothing evaluates request or nightly rules yet")
+	if !StageRequest.StageAsked() || !StageNightly.StageAsked() {
+		t.Error("request and nightly are evaluated by their own walks")
 	}
 	if !Action("require_field").Valid() || Action("detonate").Valid() {
 		t.Error("action validity follows the schema's own CHECK")

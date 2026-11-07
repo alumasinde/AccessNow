@@ -284,6 +284,47 @@ func (h *Handler) Commands(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{"items": commandViews(commands)})
 }
 
+// GateCommands is the tablet's poll for actuator work. The scope was put there by the device
+// middleware, so the handler never reads a gate id from the request.
+func (h *Handler) GateCommands(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	commands, err := h.svc.GateCommands(r.Context(), scope)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	httpx.OK(w, map[string]any{"items": commandViews(commands)})
+}
+
+// GateAckCommand closes one instruction from the barrier that executed it.
+func (h *Handler) GateAckCommand(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	id, err := httpx.ID(r, "commandID")
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	var req AckRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	command, err := h.svc.AckGateCommand(r.Context(), scope, id, req)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	httpx.OK(w, commandView(command))
+}
+
 func (h *Handler) AckCommand(w http.ResponseWriter, r *http.Request) {
 	scope, err := tenancy.Require(r.Context())
 	if err != nil {

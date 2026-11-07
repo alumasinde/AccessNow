@@ -32,12 +32,20 @@ var dummyHash = func() string {
 	return hash
 }()
 
+// ShiftCloser is the gate service's side of ending a session. It is an interface here
+// because gates already imports auth for its user repository; naming the behaviour rather
+// than the type keeps the two packages acyclic.
+type ShiftCloser interface {
+	CloseShiftForUser(ctx context.Context, scope tenancy.Scope, reason string) error
+}
+
 type Service struct {
 	pool  *sqlx.DB
 	repo  *Repository
 	chain audit.Writer
 	ttl   time.Duration
 	lock  time.Duration
+	shift ShiftCloser
 }
 
 func NewService(pool *sqlx.DB, repo *Repository, chain audit.Writer, c config.Config) *Service {
@@ -158,6 +166,12 @@ func (s *Service) Resolve(ctx context.Context, token string) (tenancy.Scope, err
 		return tenancy.Scope{}, err
 	}
 	if !session.Live(time.Now().UTC()) {
+		if s.shift != nil {
+			_ = s.shift.CloseShiftForUser(ctx, tenancy.Scope{
+				TenantID: session.TenantID, UserID: session.UserID, SessionID: session.ID,
+				GateID: derefInt64(session.ActiveGateID),
+			}, "timeout")
+		}
 		return tenancy.Scope{}, errs.Unauthenticated("session has expired")
 	}
 	user, err := s.repo.UserByID(ctx, session.UserID)
@@ -176,6 +190,10 @@ func (s *Service) Resolve(ctx context.Context, token string) (tenancy.Scope, err
 	}, nil
 }
 
+// SetShiftCloser binds the gate service after both exist. An unbound one leaves logout
+// exactly as it was: the session ends and the shift row is closed by the next scan.
+func (s *Service) SetShiftCloser(closer ShiftCloser) { s.shift = closer }
+
 func (s *Service) Current(ctx context.Context, scope tenancy.Scope) (User, error) {
 	return s.repo.UserByID(ctx, scope.UserID)
 }
@@ -183,6 +201,14 @@ func (s *Service) Current(ctx context.Context, scope tenancy.Scope) (User, error
 func (s *Service) Logout(ctx context.Context, scope tenancy.Scope) error {
 	if scope.SessionID == 0 {
 		return nil
+	}
+	// The shift is closed before the session is revoked, so the reason is filed while the
+	// session that owns it is still the caller's. A failure here must not keep a person
+	// signed in.
+	if s.shift != nil {
+		if err := s.shift.CloseShiftForUser(ctx, scope, "logout"); err != nil {
+			logging.From(ctx).ErrorContext(ctx, "close the gate shift on logout", "error", err)
+		}
 	}
 	if err := db.Transact(ctx, s.pool, func(c db.Conn) error {
 		if err := s.repo.In(c).RevokeSession(ctx, scope.SessionID, "logout"); err != nil {

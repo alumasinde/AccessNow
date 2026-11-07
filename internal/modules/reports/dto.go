@@ -71,8 +71,8 @@ func definitionView(def Definition) DefinitionView {
 	return view
 }
 
-// RunView is one export on the register. It never carries the bytes: the file went to whoever
-// asked for it, and a stored copy of a movement register is a copy nobody is tracking.
+// RunView is one export on the register. It never carries the bytes: the file is fetched from
+// /reports/runs/{runID}/download, so listing fifty runs does not move fifty files.
 type RunView struct {
 	ID          int64      `json:"id"`
 	Definition  string     `json:"definition_key"`

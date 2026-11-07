@@ -5,7 +5,7 @@ actually in the tree — not against the schema, which ships tables for modules 
 been written yet. Reference: [AccessNow – Module Design and Gate Handling.md](<AccessNow
 – Module Design and Gate Handling.md>).
 
-Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages · 41 test files
+Updated 2026-11-07 · 39 migration pairs · 37 Go packages · 15 module packages · 42 test files
 
 **Legend** — ✅ done and proved live · 🟡 built but partly · ⬜ not started
 
@@ -45,15 +45,16 @@ Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages
 - ✅ **8. Rules and Policy** — `internal/modules/rules` — condition tree plus one action,
   walked at the gate in priority order, block / warn / allow / notify / limit / require_approval,
   quota buckets, a refusal waived only when the rule allows it *and* the holder has
-  `rule.override`, full evaluation log. ⬜ Request-stage and nightly rules — the write path
-  refuses them so nothing can be filed inert.
+  `rule.override`, full evaluation log. Request-stage rules run when `pass.issued` is relayed;
+  nightly rules sweep the open register every six hours; both write the same `rule_evaluations`
+  feed as a scan and neither rewrites Core's row.
 - ✅ **9. Blacklist and Watchlist** — `internal/modules/blocklist` — matches on id number,
   phone or plate, screens every scan; a hit denies entry and never denies exit; a watchlist hit
   lets the person through and alerts the supervisor quietly.
 - ✅ **10. Notifications** — `internal/modules/notifications` — events mapped to per-tenant
   routes and templates, in-app inbox, email over SMTP, SMS and WhatsApp over an HTTP gateway,
-  five attempts with delivery status, background sweep loop. ⬜ push sender (webhook delivery
-  lives in integrations).
+  five attempts with delivery status, background sweep loop, and push over the tenant's HTTP
+  provider row with a JSON title/body envelope (webhook delivery lives in integrations).
 - ✅ **11. Offline Gate Mode** — `internal/modules/offline`. `GET /api/v1/gate/cache` stocks a
   tablet with the passes it may honour and the listings it must refuse, sends only what changed
   since the epoch the device names, and files the bundle in `offline_cache_manifests` so the
@@ -62,9 +63,9 @@ Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages
   the answer it already gave, marks late arrivals, and the server keeps the status. The ledger
   files one argument per movement under five types, tells the supervisor how many rows the
   tablet handed in and how many are argued about, and the desk resolves them at
-  `/api/v1/offline/conflicts`. A gate with `offline_capable = 0` is refused a cache. ⬜ the
-  cached pass still carries a NULL per-pass scan token, so a device offline honours a pass by
-  number alone.
+  `/api/v1/offline/conflicts`. A gate with `offline_capable = 0` is refused a cache. Every
+  newly sent pass carries an `offline_token` in the bundle; its hash is filed in
+  `offline_cache_manifests.token_hash`, and the same token resolves when the queue replays.
 - ✅ **12. Emergency Roll-Call** — `internal/modules/rollcall` — one incident per site at a
   time, raised from a gate, freezing Core's open movements into `evacuation_roster` so the board
   does not change under a warden. Marks transition one locked row at a time into
@@ -82,8 +83,9 @@ Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages
   text as WinAnsi. Schedules are hourly, daily, weekly or monthly on the tenant's own zone
   (`time/tzdata` is embedded), take a lookback, recipients and roles, soft-delete so past runs
   keep their link, and are run by a half-minute loop that marks each outcome, skips a tenant
-  whose module is off, and publishes `report.ready` for the notifier. ⬜ a stored file with a
-  download link — nothing is kept, so a run row is a receipt rather than a copy.
+  whose module is off, and publishes `report.ready` for the notifier. The rendered bytes are
+  kept on `report_runs.artifact` with their content type (`0039`), and
+  `GET /reports/runs/{runID}/download` returns the same file.
 - ✅ **14. Audit and Compliance** — `internal/modules/compliance` — retention policies for the
   five categories the purge can honour, with four actions: **null** blanks a value in place,
   **anonymise** replaces an identifier with a stable hash, **delete** removes an attachment row
@@ -92,9 +94,10 @@ Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages
   a dry run, refuses without a policy, counts held rows and blanks only what no active legal
   hold protects; holds are placed, released and expired on their own date; and chain
   verification rebuilds the writer's hash through `audit.VerifyChain`, catching both an edited
-  row and a removed one, with every check recorded in `audit_verifications`. ⬜ notifying a data
-  owner before a purge lands (`notify_before_days` is stored and not sent), and read-only
-  enforcement for the auditor role — the permission exists, the middleware does not.
+  row and a removed one, with every check recorded in `audit_verifications`. A six-hour sweep
+  publishes `compliance.purge_due` before a policy's next eligible date (`notify_before_days`,
+  `last_notified_at` in `0039`), and the auditor role is read-only at the router for every
+  mutation except its own logout.
 - ✅ **15. Integrations and API** — `internal/modules/integrations` — API keys issued with a
   one-time secret, a stored SHA-256 and a short prefix, scopes, environment, expiry and a
   revocation reason, authenticated on the machine surface from `X-API-Key`; **each machine data
@@ -114,8 +117,9 @@ Updated 2026-11-07 · 38 migration pairs · 37 Go packages · 15 module packages
   **Per-key rate limiting is shared**: the fixed one-minute window lives in
   `api_key_rate_windows` (`0037`), so every API instance charges the same budget, takes
   `rate_limit_per_minute` as the limit (600 when unset), and answers an over-budget call with a
-  429 and `Retry-After`. Actuator commands remain idempotent and audited. ⬜ a device-facing pull
-  of queued actuator commands.
+  429 and `Retry-After`. Actuator commands remain idempotent and audited.
+  `GET /api/v1/gate/integrations/commands` pulls the queued commands for the device's own gate,
+  and `POST .../{commandID}/ack` closes one only from that gate.
 
 ---
 
@@ -125,23 +129,24 @@ Always-on Core, not sellable modules.
 
 - ✅ Tenants, sites, gates, users, roles and permissions, module on/off flags, sessions.
 - ✅ Embedded, re-runnable migrations with up and down; applied, rolled back and re-applied.
-- ✅ Tenant pass-number formats, one allocator per tenant per period. ⬜ No admin endpoint yet —
-  only the seed writes formats, so a tenant cannot change its own numbering through the API.
+- ✅ Tenant pass-number formats, one allocator per tenant per period, and an admin surface:
+  `GET /passes/number-formats` and `PUT /passes/number-formats/{formatKey}` validate the
+  pattern, sequence width, reset period and rendered length before saving.
 - ✅ Server-side `active_gate_id`, the picker for a guard with several gates, switching writes
-  an audit entry, and every scan takes the gate from the session rather than a form field.
-- 🟡 `active_gate_id` is checked against the guard's assignments when it is picked; no
-  middleware revalidates it on every request.
-- ✅ Gate sessions for shift accountability, closed on switch or `/gates/shift/end`. Movements
-  carry `gate_id`, `gate_session_id` and the guard. ⬜ The `logout` and `timeout` close reasons.
-- ✅ Shared devices: a device token decides the gate on `/api/v1/gate/*`.
+  an audit entry, and every scan takes the gate from the session rather than a form field. The
+  active gate is revalidated on every authenticated request, so a disabled gate or a revoked
+  assignment stops the session instead of waiting for the next pick.
+- ✅ Gate sessions for shift accountability, closed on switch, `/gates/shift/end`, logout and
+  session timeout, with the schema's own `logout` and `timeout` reasons.
+- ✅ Shared devices: a device token decides the gate on `/api/v1/gate/*`, and the device path
+  re-checks the guard's assignment before it attaches a shift.
 - ✅ Gate categories enforced at the barrier — a delivery pass scanned at Main is red with
   "not valid at this gate".
-- 🟡 Enter at one gate and exit at another works; `same_gate_exit_required` is read into the
-  model and never consulted, so strict mode is a column.
-- ⬜ Gate `opens_at` / `closes_at` and `gate_time_windows` are not enforced at scan time — only
-  the pass's own validity window is. A gate can be disabled and still answer.
-- ⬜ `pass_gates` (a pass restricted to an allowed-gates list) is schema only; the refusal above
-  comes from categories.
+- ✅ `same_gate_exit_required` is enforced: an exit through a different gate is refused when
+  the pass has an open entry.
+- ✅ Gate `opens_at` / `closes_at`, `gate_time_windows` (day, category, allow/block, overnight)
+  and the gate's `status` are enforced at scan time; `pass_gates` narrows a pass to its listed
+  gates.
 
 ---
 
@@ -159,10 +164,11 @@ Always-on Core, not sellable modules.
   reusables. The chain's hash formula is exported for verification instead of being copied.
 - ✅ `cmd/api`, `cmd/migrate`, `cmd/devseed` — one tenant you can log into, re-runnable; a
   `Makefile` with build, fmt, vet, test, check, run and seed.
-- ✅ Unit and engine tests, and the layering test. ⬜ HTTP integration tests that drive the
-  router itself; ⬜ CI workflow, lint config and a container build. The webhook and sync
-  transports are tested for signing, address refusal, backoff and receiver behaviour, but have
-  not been exercised against a real external system.
+- ✅ Unit and engine tests, the layering test, and a router-level HTTP test that serves
+  `/healthz` and the not-found boundary through the real handler stack. CI (`.github/workflows`)
+  runs gofmt, build, vet and tests, with `.golangci.yml` and a multi-stage `Dockerfile`. The
+  webhook and sync transports are tested for signing, address refusal, backoff and receiver
+  behaviour, but have not been exercised against a real external system.
 - ✅ Every gate surface that has code now has tests: visitor, vehicle, material, staff,
   contractor, scanning, roll-call, offline, blocklist, rules, approval, notifications, reports
   (including PDF structure and pagination), compliance (including the action matrix) and
@@ -177,13 +183,13 @@ Always-on Core, not sellable modules.
 
 ## 4. Design-doc open items
 
-- ✅ **Migrations request, section 4 — closed.** `migrations/` is numbered `0001…0038` in
+- ✅ **Migrations request, section 4 — closed.** `migrations/` is numbered `0001…0039` in
   grouped, sensibly named pairs, each with an up and a down; statements are re-runnable;
   `users` keeps `first_name` and `last_name`; roles, permissions, `role_permissions`, visitors,
   `visitor_companies` and the related tables are all there; no `ENUM` anywhere — `VARCHAR` with
   a `CHECK` instead, so a new value is a migration and not a rebuild. The later additions are
-  `0036` (archive receipts), `0037` (shared rate window) and `0038` (sync attempt and retry
-  columns).
+  `0036` (archive receipts), `0037` (shared rate window), `0038` (sync attempt and retry
+  columns) and `0039` (report artifacts, pre-purge warning stamp, purge-due event).
 - ✅ **Next module — the standing brief is covered.** Items 1–15 are written. Nothing below is
   a new module; each one is a named edge of code that already exists.
 
@@ -196,29 +202,28 @@ been carrying in ⬜ and 🟡, collected here so they can be closed one at a tim
 
 **Gate behaviour (Core)**
 
-- ⬜ No admin endpoint for a tenant's pass-number format; only the seed writes it.
-- 🟡 `active_gate_id` is validated when picked, not revalidated on every request.
-- ⬜ `same_gate_exit_required` is stored but never consulted at the barrier.
-- ⬜ Gate opening hours (`opens_at` / `closes_at`, `gate_time_windows`) are not enforced at
-  scan time, and a disabled gate still answers.
-- ⬜ `pass_gates` — a pass restricted to listed gates — is schema only.
-- ⬜ Gate sessions have no `logout` or `timeout` close reason.
+- ✅ Pass-number admin endpoints, validated against the same renderer the allocator uses.
+- ✅ `active_gate_id` revalidated on every authenticated request.
+- ✅ `same_gate_exit_required` enforced at the barrier.
+- ✅ Gate status, opening hours, `gate_time_windows` and `pass_gates` enforced at scan time.
+- ✅ Gate sessions close with `logout` and `timeout`.
 
 **Module edges**
 
-- ⬜ Rules: request-stage and nightly rules are refused at write time, not implemented.
-- ⬜ Notifications: no push sender.
-- ⬜ Offline: the cached pass carries no per-pass scan token, so offline entry is by number.
-- ⬜ Reports: no stored artifact or download link; a run is a receipt, not a file.
-- ⬜ Compliance: no notification before a purge (`notify_before_days` unused).
-- ⬜ Compliance: read-only enforcement for the auditor role; the permission exists, the
-  middleware does not.
-- ⬜ Integrations: no device-facing pull of queued actuator commands.
+- ✅ Rules: request-stage evaluation on `pass.issued`, nightly sweep over the open register.
+- ✅ Notifications: push sender over the tenant's HTTP provider row.
+- ✅ Offline: per-pass scan token issued with the cache and hashed in the manifest.
+- ✅ Reports: stored artifact with a download endpoint.
+- ✅ Compliance: `compliance.purge_due` warnings before the next eligible date.
+- ✅ Compliance: auditor role enforced read-only at the router.
+- ✅ Integrations: gate-device actuator pull and gate-scoped acknowledgement.
 
 **Delivery**
 
-- ⬜ No HTTP integration tests that drive the real router (the new coverage is handler, service
-  and transport level).
-- ⬜ No CI workflow, lint configuration or container build.
-- ⬜ Webhooks and sync have not run against a real third-party system; the fake receiver proves
-  the wire shape, not a vendor's quirks.
+- ✅ Router-level HTTP test, CI workflow, lint configuration and a multi-stage `Dockerfile`.
+  Go build, vet, tests and lint were run locally, and the service booted against MySQL with
+  `/readyz` and `/healthz` both returning 200. The image itself was not built because the
+  Docker daemon was not running.
+- ⬜ Webhooks and sync have not run against a real third-party system. The fake receiver proves
+  the wire shape; a vendor's own quirks still need one run with real credentials and a real
+  endpoint.

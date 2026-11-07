@@ -19,7 +19,7 @@ func NewRepository(q db.Conn) *Repository { return &Repository{q: q} }
 func (r *Repository) In(c db.Conn) *Repository { bound := *r; bound.q = c; return &bound }
 
 const policyColumns = `id, tenant_id, data_category, retention_days, purge_action,
-	notify_before_days, last_run_at, is_active, updated_by, created_at, updated_at`
+	notify_before_days, last_run_at, last_notified_at, is_active, updated_by, created_at, updated_at`
 
 func (r *Repository) Policies(ctx context.Context, tenantID int64) ([]Policy, error) {
 	var out []Policy
@@ -81,6 +81,28 @@ func (r *Repository) UpsertPolicy(ctx context.Context, p Policy, at time.Time) (
 		return 0, fmt.Errorf("read retention policy id: %w", err)
 	}
 	return id, nil
+}
+
+// PolicyTenants is the pre-purge sweep's tenant list: a notice only exists for a tenant with
+// an active policy that asked for one.
+func (r *Repository) PolicyTenants(ctx context.Context) ([]int64, error) {
+	const query = `SELECT DISTINCT tenant_id FROM retention_policies
+		WHERE is_active = 1 AND notify_before_days IS NOT NULL`
+	var out []int64
+	if err := r.q.SelectContext(ctx, &out, query); err != nil {
+		return nil, fmt.Errorf("read tenants with retention notices: %w", err)
+	}
+	return out, nil
+}
+
+// MarkNotified stamps the warning so the same policy does not shout on every sweep.
+func (r *Repository) MarkNotified(ctx context.Context, tenantID, id int64, at time.Time) error {
+	if _, err := r.q.ExecContext(ctx, `UPDATE retention_policies
+		SET last_notified_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?`,
+		at, at, tenantID, id); err != nil {
+		return fmt.Errorf("record pre-purge notice: %w", err)
+	}
+	return nil
 }
 
 // TouchPolicy records that a purge used this policy, so the desk can see the rule doing work.

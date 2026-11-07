@@ -179,7 +179,7 @@ func (s *senders) construct(p Provider) (Sender, error) {
 			From:     from,
 		})
 	case ProviderHTTP:
-		if from == "" {
+		if from == "" && Channel(p.Channel) != ChannelPush {
 			return nil, fmt.Errorf("%s provider needs a sender_id (the short code or account)", p.Provider)
 		}
 		apiKey := ""
@@ -188,6 +188,15 @@ func (s *senders) construct(p Provider) (Sender, error) {
 			if apiKey == "" {
 				return nil, fmt.Errorf("secret %q is not set in the environment", ref)
 			}
+		}
+		// The push channel speaks the push envelope over the same HTTP provider row: a
+		// gateway URL and a key are all a tenant configures either way.
+		if Channel(p.Channel) == ChannelPush {
+			return newPushSender(pushSettings{
+				URL: o.str("base_url", ""), APIKey: apiKey,
+				Header: o.str("auth_header", "Authorization"),
+				Scheme: o.str("auth_scheme", "Bearer"),
+			})
 		}
 		return newHTTPSender(httpSettings{
 			URL:     o.str("base_url", ""),

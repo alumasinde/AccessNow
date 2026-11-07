@@ -18,6 +18,7 @@ import (
 	"accessnow/internal/platform/db"
 	"accessnow/internal/platform/errs"
 	"accessnow/internal/platform/events"
+	"accessnow/internal/platform/logging"
 	"accessnow/internal/platform/tenancy"
 )
 
@@ -32,16 +33,19 @@ type Service struct {
 	// screen is the list half of a cache. It is a dependency rather than a query because the
 	// list belongs to another module, and nothing here may require that module to be bought.
 	screen Screenings
+	// tokens is the scan module's issue seam. A cache with a pass number but no signed token
+	// would make the tablet rely on a value the server never checked.
+	tokens Tokens
 	access *access.Service
 	events events.Publisher
 	chain  audit.Writer
 }
 
 func NewService(pool *sqlx.DB, repo *Repository, devices *gates.Repository,
-	passRepo *passes.Repository, screen Screenings, accessSvc *access.Service,
+	passRepo *passes.Repository, screen Screenings, tokens Tokens, accessSvc *access.Service,
 	bus events.Publisher, chain audit.Writer) *Service {
 	return &Service{pool: pool, repo: repo, devices: devices, passes: passRepo, screen: screen,
-		access: accessSvc, events: bus, chain: chain}
+		tokens: tokens, access: accessSvc, events: bus, chain: chain}
 }
 
 // enabled is the switch that keeps the module optional. With it off the desk surface is not
@@ -127,6 +131,13 @@ func (s *Service) Bundle(ctx context.Context, scope tenancy.Scope, claim int64) 
 		AllowedCategories: categories, SameGateExit: gate.SameGateExitRequired,
 	}
 	send, stock, removed := assemble(current, held, now, to)
+	if err := s.issueTokens(ctx, scope.TenantID, send, stock); err != nil {
+		// A token issue failure is logged rather than fatal: the cache is still useful for the
+		// passes whose tokens were minted, and a gate with a stale cache must not be blocked
+		// from refreshing it because one token row could not be written.
+		logging.From(ctx).ErrorContext(ctx, "issue offline scan tokens",
+			"tenant_id", scope.TenantID, "device_id", device.ID, "error", err)
+	}
 	out.Removed = removed
 	if !stale && len(send) == 0 && len(removed) == 0 {
 		out.Fresh = true
@@ -197,6 +208,9 @@ func assemble(current []passes.Cacheable, held []Manifest, now, to time.Time) (
 		previous, seen := byPass[row.PassID]
 		if seen && sameWindow(previous, into) {
 			into.PushedAt = previous.PushedAt
+			// The tablet still holds the token from the earlier bundle; re-sending it would
+			// hand the same pass a second secret and leave both live.
+			into.TokenHash = previous.TokenHash
 		} else {
 			send = append(send, handed(row, into))
 		}
@@ -255,6 +269,32 @@ func reasonOf(row passes.Cacheable, to time.Time) CacheReason {
 		return ReasonRange
 	}
 	return ReasonToday
+}
+
+// issueTokens mints one short-lived token per pass being sent, and files its hash on the
+// matching manifest. Passes already held unchanged are not sent and keep the token hash the
+// ledger already has.
+func (s *Service) issueTokens(ctx context.Context, tenantID int64, send []CachedPass,
+	stock []Manifest) error {
+	if s.tokens == nil || len(send) == 0 {
+		return nil
+	}
+	index := make(map[int64]int, len(stock))
+	for i := range stock {
+		index[stock[i].PassID] = i
+	}
+	for i := range send {
+		secret, hash, err := s.tokens.IssueForOffline(ctx, tenantID, send[i].PassID,
+			send[i].ValidUntil)
+		if err != nil {
+			return err
+		}
+		send[i].OfflineToken = secret
+		if at, ok := index[send[i].PassID]; ok {
+			stock[at].TokenHash = hash
+		}
+	}
+	return nil
 }
 
 func handed(row passes.Cacheable, into Manifest) CachedPass {

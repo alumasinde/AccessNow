@@ -576,6 +576,69 @@ func (s *Service) AckCommand(ctx context.Context, scope tenancy.Scope, id int64,
 	return s.repo.Command(ctx, scope.TenantID, id)
 }
 
+// GateCommands is what the tablet asks for when it is ready to actuate. The gate comes from
+// the device token, never from a query, so a tablet cannot drain another barrier's queue.
+func (s *Service) GateCommands(ctx context.Context, scope tenancy.Scope) ([]Command, error) {
+	if scope.GateID == 0 || scope.DeviceID == 0 {
+		return nil, errs.Forbidden("a gate device is required")
+	}
+	on, err := s.enabled(ctx, scope.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	if !on {
+		return nil, errs.ModuleDisabled(ModuleKey)
+	}
+	return s.repo.GateCommands(ctx, scope.TenantID, scope.GateID, 50)
+}
+
+// AckGateCommand closes a command with what the barrier did. The command must belong to the
+// device's gate; a guard at one barrier cannot acknowledge another barrier's instruction.
+func (s *Service) AckGateCommand(ctx context.Context, scope tenancy.Scope, id int64,
+	req AckRequest) (Command, error) {
+	if scope.GateID == 0 || scope.DeviceID == 0 {
+		return Command{}, errs.Forbidden("a gate device is required")
+	}
+	status := strings.TrimSpace(req.Status)
+	switch status {
+	case CommandConfirmed, CommandFailed, CommandTimeout:
+	default:
+		return Command{}, errs.BadField("status", "must be confirmed, failed or timeout")
+	}
+	on, err := s.enabled(ctx, scope.TenantID)
+	if err != nil {
+		return Command{}, err
+	}
+	if !on {
+		return Command{}, errs.ModuleDisabled(ModuleKey)
+	}
+	var closed bool
+	now := s.now()
+	err = db.Transact(ctx, s.pool, func(c db.Conn) error {
+		moved, err := s.repo.In(c).AckAtGate(ctx, scope.TenantID, scope.GateID, id, status,
+			req.Message, now)
+		if err != nil {
+			return err
+		}
+		closed = moved
+		if !moved {
+			return nil
+		}
+		return s.chain.Write(ctx, c, audit.Entry{
+			TenantID: scope.TenantID, ActorUserID: scope.UserID, Action: "integration.actuator_acked",
+			SubjectType: "actuator_command", SubjectID: id, SiteID: scope.SiteID, GateID: scope.GateID,
+			After: map[string]any{"status": status, "message": req.Message, "device_id": scope.DeviceID},
+		})
+	})
+	if err != nil {
+		return Command{}, err
+	}
+	if !closed {
+		return Command{}, errs.Conflict("command is not open at this gate")
+	}
+	return s.repo.Command(ctx, scope.TenantID, id)
+}
+
 // buildWebhook validates a receiver. An https endpoint with a public address is the rule: a
 // webhook URL is a request this server makes, and pointing it at 127.0.0.1 is how a tenant
 // probes the network the API runs in.

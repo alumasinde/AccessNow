@@ -58,3 +58,11 @@ func Register(r chi.Router, h *Handler, g router.Guard) {
 	r.With(machine).Get("/integrations/machine/passes/{passNo}", h.MachinePass)
 	r.With(machine).Get("/integrations/machine/movements", h.MachineMovements)
 }
+
+// RegisterGate mounts the actuator queue on the gate surface. The device middleware, not a
+// person's picker, decides which gate's queue is read and which command may be acknowledged.
+func RegisterGate(r chi.Router, h *Handler, g router.Guard) {
+	gate := g.Chain(g.Session, g.Device, g.Module(ModuleKey))
+	r.With(gate).Get("/integrations/commands", h.GateCommands)
+	r.With(gate).Post("/integrations/commands/{commandID}/ack", h.GateAckCommand)
+}

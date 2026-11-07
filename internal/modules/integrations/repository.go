@@ -412,6 +412,34 @@ func (r *Repository) Ack(ctx context.Context, tenantID, id int64, status, messag
 	return db.RowsChanged(result)
 }
 
+// GateCommands is the tablet's pull: work queued for this gate that has not been confirmed.
+// A sent row is still returned because a device that crashed after pulling must be able to
+// pick the instruction up again; the ack is what closes it.
+func (r *Repository) GateCommands(ctx context.Context, tenantID, gateID int64,
+	limit int) ([]Command, error) {
+	var out []Command
+	if err := r.q.SelectContext(ctx, &out, `SELECT `+commandColumns+commandFrom+`
+		WHERE c.tenant_id = ? AND c.gate_id = ? AND c.status IN ('queued', 'sent')
+		ORDER BY c.available_at ASC, c.id ASC LIMIT ?`, tenantID, gateID, limit); err != nil {
+		return nil, fmt.Errorf("read gate actuator commands: %w", err)
+	}
+	return out, nil
+}
+
+// AckAtGate closes a command only if it belongs to the gate the device is standing at. The
+// desk's ack path is tenant-wide; this one is deliberately narrower.
+func (r *Repository) AckAtGate(ctx context.Context, tenantID, gateID, id int64, status,
+	message string, at time.Time) (bool, error) {
+	const query = `UPDATE actuator_commands
+		SET status = ?, acked_at = ?, error_message = NULLIF(?, '')
+		WHERE tenant_id = ? AND gate_id = ? AND id = ? AND status IN ('queued', 'sending', 'sent')`
+	result, err := r.q.ExecContext(ctx, query, status, at, message, tenantID, gateID, id)
+	if err != nil {
+		return false, fmt.Errorf("acknowledge gate actuator command: %w", err)
+	}
+	return db.RowsChanged(result)
+}
+
 // GateKnown checks the gate belongs to the tenant before a command names it. The foreign key
 // would accept another tenant's gate id; this is what stops that becoming a row.
 func (r *Repository) GateKnown(ctx context.Context, tenantID, gateID int64) (bool, error) {

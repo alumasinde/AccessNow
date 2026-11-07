@@ -181,3 +181,70 @@ func (r *Repository) GateCategories(ctx context.Context, gateID int64) ([]string
 	}
 	return keys, nil
 }
+
+// GateWindow is one row of a gate's own opening pattern. Day is ISO 1..7 with 0 meaning
+// every day, matching the column's own comment.
+type GateWindow struct {
+	Day      int     `db:"day_of_week"`
+	StartsAt string  `db:"starts_at"`
+	ClosesAt string  `db:"closes_at"`
+	Crosses  bool    `db:"crosses_midnight"`
+	Category *string `db:"category_key"`
+	Action   string  `db:"action"`
+}
+
+// GateRules is everything a barrier decides with that is not on the pass row: whether the
+// checkpoint is switched on, its daily hours, its windows, the categories and gates it
+// honours, and whether an exit has to use the same gate as its entry.
+type GateRules struct {
+	Status       string
+	OpensAt      string
+	ClosesAt     string
+	SameGateExit bool
+	Categories   []string
+	Windows      []GateWindow
+	AllowedGates []int64
+}
+
+func (r *Repository) GateRules(ctx context.Context, tenantID, gateID, passID int64) (GateRules, error) {
+	const gateQuery = `SELECT status,
+		COALESCE(TIME_FORMAT(opens_at, '%H:%i:%s'), '') AS opens_at,
+		COALESCE(TIME_FORMAT(closes_at, '%H:%i:%s'), '') AS closes_at,
+		same_gate_exit_required
+		FROM gates WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`
+	var gate struct {
+		Status       string `db:"status"`
+		OpensAt      string `db:"opens_at"`
+		ClosesAt     string `db:"closes_at"`
+		SameGateExit bool   `db:"same_gate_exit_required"`
+	}
+	err := r.q.GetContext(ctx, &gate, gateQuery, gateID, tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GateRules{}, errs.NotFound("gate")
+	}
+	if err != nil {
+		return GateRules{}, fmt.Errorf("read gate rules: %w", err)
+	}
+	out := GateRules{Status: gate.Status, OpensAt: gate.OpensAt, ClosesAt: gate.ClosesAt,
+		SameGateExit: gate.SameGateExit}
+
+	const windowQuery = `SELECT day_of_week, TIME_FORMAT(starts_at, '%H:%i:%s') AS starts_at,
+		TIME_FORMAT(closes_at, '%H:%i:%s') AS closes_at, crosses_midnight, category_key, action
+		FROM gate_time_windows WHERE gate_id = ? AND is_active = 1
+		ORDER BY day_of_week, starts_at`
+	if err := r.q.SelectContext(ctx, &out.Windows, windowQuery, gateID); err != nil {
+		return GateRules{}, fmt.Errorf("read gate time windows: %w", err)
+	}
+
+	categories, err := r.GateCategories(ctx, gateID)
+	if err != nil {
+		return GateRules{}, err
+	}
+	out.Categories = categories
+
+	const allowedQuery = `SELECT gate_id FROM pass_gates WHERE tenant_id = ? AND pass_id = ?`
+	if err := r.q.SelectContext(ctx, &out.AllowedGates, allowedQuery, tenantID, passID); err != nil {
+		return GateRules{}, fmt.Errorf("read pass gates: %w", err)
+	}
+	return out, nil
+}

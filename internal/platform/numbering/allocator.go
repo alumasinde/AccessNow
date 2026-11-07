@@ -21,6 +21,21 @@ type Allocator struct{ repo *Repository }
 
 func NewAllocator(repo *Repository) *Allocator { return &Allocator{repo} }
 
+// Formats and SaveFormat expose the admin side of numbering through the allocator Core
+// already holds, so passes does not need a second numbering dependency just to show the
+// scheme its own numbers come from.
+func (a *Allocator) Formats(ctx context.Context, tenantID int64) ([]Format, error) {
+	return a.repo.Formats(ctx, tenantID)
+}
+
+func (a *Allocator) Format(ctx context.Context, tenantID int64, formatKey string) (Format, error) {
+	return a.repo.Format(ctx, tenantID, formatKey)
+}
+
+func (a *Allocator) SaveFormat(ctx context.Context, format Format) error {
+	return a.repo.SaveFormat(ctx, format)
+}
+
 // Next hands out one pass number. Call it on the transaction that inserts the pass: a
 // rolled back issue would otherwise burn a number, which is exactly what a gap_required
 // format forbids.

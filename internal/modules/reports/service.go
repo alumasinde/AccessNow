@@ -147,7 +147,7 @@ func (s *Service) run(ctx context.Context, tenantID, userID int64, trigger strin
 	sum := sha256.Sum256(bytes)
 	duration := int(s.now().Sub(started).Milliseconds())
 	if err := s.repo.FinishRun(ctx, tenantID, runID, len(rows), fileName, int64(len(bytes)),
-		hex.EncodeToString(sum[:]), duration, s.now()); err != nil {
+		hex.EncodeToString(sum[:]), bytes, contentTypeOf(format), duration, s.now()); err != nil {
 		return Artifact{}, err
 	}
 
@@ -187,10 +187,26 @@ func (s *Service) Runs(ctx context.Context, filter RunFilter) ([]Run, error) {
 	return s.repo.Runs(ctx, filter)
 }
 
-// RunByID reads one export from the register. It is not the run itself: nothing keeps the
-// bytes, so a run row is a receipt rather than a download.
+// RunByID reads one export from the register.
 func (s *Service) RunByID(ctx context.Context, tenantID, id int64) (Run, error) {
 	return s.repo.Run(ctx, tenantID, id)
+}
+
+// Download returns the bytes a run produced. A run that predates stored artifacts, or whose
+// file was purged, keeps its receipt and says there is nothing to hand back.
+func (s *Service) Download(ctx context.Context, tenantID, id int64) (Artifact, error) {
+	run, content, contentType, err := s.repo.RunArtifact(ctx, tenantID, id)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if len(content) == 0 || run.Status != RunSucceeded {
+		return Artifact{}, errs.Conflict("this run has no stored file")
+	}
+	name := "report-" + fmt.Sprint(run.ID)
+	if run.FileName != nil && *run.FileName != "" {
+		name = *run.FileName
+	}
+	return Artifact{Run: run, FileName: name, ContentType: contentType, Bytes: content}, nil
 }
 
 // The schedules.

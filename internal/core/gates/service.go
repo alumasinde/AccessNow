@@ -137,11 +137,28 @@ func (s *Service) Device(ctx context.Context, deviceToken string) (Device, error
 }
 
 // AttachDevice points the request scope at the device's gate and opens a shift there if
-// the guard is not already standing at it.
+// the guard is not already standing at it. The assignment is re-checked here, not only when
+// the gate was picked, so revoking a guard's gate stops the tablet in their hand.
 func (s *Service) AttachDevice(ctx context.Context, scope tenancy.Scope, device Device) (tenancy.Scope, error) {
 	gateID := *device.GateID
 	if device.TenantID != scope.TenantID {
 		return scope, errs.Forbidden("device belongs to another tenant")
+	}
+	gate, err := s.repo.ByID(ctx, scope.TenantID, gateID)
+	if err != nil {
+		return scope, err
+	}
+	if gate.Status != "active" {
+		return scope, errs.Conflict(gate.Name + " is " + gate.Status)
+	}
+	if !scope.IsSuperAdmin {
+		assigned, err := s.repo.IsAssigned(ctx, scope.TenantID, gateID, scope.UserID)
+		if err != nil {
+			return scope, err
+		}
+		if !assigned {
+			return scope, errs.GateUnassigned(gateID)
+		}
 	}
 	shift, err := s.repo.CurrentShift(ctx, scope.UserID)
 	if err != nil {
@@ -149,10 +166,6 @@ func (s *Service) AttachDevice(ctx context.Context, scope tenancy.Scope, device 
 	}
 	shiftID := int64(0)
 	if shift == nil || shift.GateID != gateID || !shift.Open() {
-		gate, err := s.repo.ByID(ctx, scope.TenantID, gateID)
-		if err != nil {
-			return scope, err
-		}
 		shiftID, err = s.openShift(ctx, scope, gate, shift)
 		if err != nil {
 			return scope, fmt.Errorf("attach device gate: %w", err)
@@ -165,6 +178,65 @@ func (s *Service) AttachDevice(ctx context.Context, scope tenancy.Scope, device 
 	scope.DeviceID = device.ID
 	scope.GateShiftID = shiftID
 	return scope, nil
+}
+
+// RevalidateActive refuses a session whose stored gate has been disabled or whose assignment
+// has been revoked since it was picked. It is cheap - one gate row and, for a non-superadmin,
+// one membership check - and it is the difference between a revoked guard and a revoked guard
+// whose browser still works.
+func (s *Service) RevalidateActive(ctx context.Context, scope tenancy.Scope) error {
+	if scope.GateID == 0 {
+		return nil
+	}
+	gate, err := s.repo.ByID(ctx, scope.TenantID, scope.GateID)
+	if err != nil {
+		if errs.CodeOf(err) == errs.CodeNotFound {
+			return errs.Forbidden("your active gate is no longer available; choose a gate again")
+		}
+		return err
+	}
+	if gate.Status != "active" {
+		return errs.Conflict(gate.Name + " is " + gate.Status + "; choose another gate")
+	}
+	if scope.IsSuperAdmin {
+		return nil
+	}
+	assigned, err := s.repo.IsAssigned(ctx, scope.TenantID, gate.ID, scope.UserID)
+	if err != nil {
+		return err
+	}
+	if !assigned {
+		return errs.GateUnassigned(gate.ID)
+	}
+	return nil
+}
+
+// CloseShiftForUser closes whatever shift the person has open, with the reason the session
+// ended. Logout and timeout are already in the schema's vocabulary; this is what writes them.
+func (s *Service) CloseShiftForUser(ctx context.Context, scope tenancy.Scope, reason string) error {
+	if reason != "logout" && reason != "timeout" {
+		reason = "logout"
+	}
+	shift, err := s.repo.CurrentShift(ctx, scope.UserID)
+	if err != nil || shift == nil {
+		return err
+	}
+	return db.Transact(ctx, s.pool, func(c db.Conn) error {
+		repo := s.repo.In(c)
+		if err := repo.CloseShift(ctx, shift.ID, reason); err != nil {
+			return err
+		}
+		if scope.SessionID > 0 {
+			if err := s.users.In(c).SetActiveGate(ctx, scope.SessionID, 0); err != nil {
+				return err
+			}
+		}
+		return s.chain.Write(ctx, c, audit.Entry{
+			TenantID: scope.TenantID, ActorUserID: scope.UserID, Action: "gate.shift_ended",
+			SubjectType: "gate_session", SubjectID: shift.ID, GateID: shift.GateID,
+			GateSessionID: shift.ID, Reason: reason,
+		})
+	})
 }
 
 func int64Ptr(value int64) *int64 {

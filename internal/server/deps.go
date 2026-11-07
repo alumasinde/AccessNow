@@ -3,6 +3,7 @@
 package server
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -78,9 +79,11 @@ type Deps struct {
 
 	Notifications *notifications.Handler
 
-	ReportsLoop  *reports.Loop
-	WebhooksLoop *integrations.Loop
-	SyncLoop     *integrations.SyncLoop
+	ReportsLoop    *reports.Loop
+	WebhooksLoop   *integrations.Loop
+	SyncLoop       *integrations.SyncLoop
+	RulesLoop      *rules.NightlyLoop
+	ComplianceLoop *compliance.Loop
 }
 
 func Build(pool *sqlx.DB, cfg config.Config) *Deps {
@@ -101,6 +104,10 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	authSvc := auth.NewService(pool, authRepo, chain, cfg)
 	gateRepo := gates.NewRepository(pool)
 	gateSvc := gates.NewService(pool, gateRepo, authRepo, accessSvc, chain)
+	// Logout and an expired session both close the shift with a reason from the gate
+	// schema's own vocabulary. The service is bound here because gates already depends on
+	// auth's repository; the interface keeps the dependency one-way.
+	authSvc.SetShiftCloser(gateSvc)
 	passRepo := passes.NewRepository(pool)
 	// The workflow plugs into Core through an empty handle, because Core needs the guard to
 	// build and the guard needs Core's service to answer. Bind completes it below; nothing
@@ -158,7 +165,7 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// screening list reaches it through the wiring rather than as a dependency: a tenant that
 	// runs gates offline without the list gets a cache with the passes in it.
 	offlineSvc := offline.NewService(pool, offline.NewRepository(pool), gateRepo, passRepo,
-		screeningCache{svc: blocklistSvc}, accessSvc, bus, chain)
+		screeningCache{svc: blocklistSvc}, scanningSvc, accessSvc, bus, chain)
 	ledger.Bind(offlineSvc)
 	// The notification provider's credentials come from the environment by name, so nothing
 	// in this wiring ever holds a secret it could log.
@@ -198,6 +205,9 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 	// A pass that becomes usable gets a badge without the desk minting one, and a pass that
 	// ends takes its badges with it. Both sides are idempotent: the relay delivers at least
 	// once, and a badge left on a dead pass is the one failure this module must not allow.
+	// Request-stage rules are judged as soon as the pass exists, which is the desk's first
+	// chance to hear that a restriction applies before anybody approves it.
+	registry.On("pass.issued", rulesSvc.OnPassIssued)
 	registry.On("pass.approved", scanningSvc.OnPassApproved)
 	registry.On("pass.issued", scanningSvc.OnPassIssued)
 	for _, eventKey := range scanning.SettledKeys() {
@@ -211,8 +221,17 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		registry.On(eventKey, notificationsSvc.OnEvent)
 	}
 
+	// Session resolution, then the auditor's read-only rule, then the active-gate check. The
+	// order matters: both middlewares read the scope the session just put on the request.
+	baseSession := auth.NewMiddleware(authSvc).Session
+	readOnly := accessSvc.ReadOnly()
+	activeGate := gates.NewActiveGateMiddleware(gateSvc).Require
+	session := func(next http.Handler) http.Handler {
+		return baseSession(readOnly(activeGate(next)))
+	}
+
 	guard := router.Guard{
-		Session:    auth.NewMiddleware(authSvc).Session,
+		Session:    session,
 		Module:     accessSvc.Module,
 		Permission: accessSvc.Permission,
 		GateWork:   accessSvc.GateWork(),
@@ -249,5 +268,11 @@ func Build(pool *sqlx.DB, cfg config.Config) *Deps {
 		// An HR or ERP exchange is a queue like the other two: the shortest cadence a system
 		// may ask for is a minute, so the tick is a minute.
 		SyncLoop: integrations.NewSyncLoop(integrationsSvc, time.Minute),
+		// Nightly rules are a sweep, not a request: six hours is fine for a rule about a day
+		// or a week, and one pass over the open register per tenant is cheap.
+		RulesLoop: rules.NewNightlyLoop(rulesSvc, 6*time.Hour),
+		// Retention warnings are a sweep too: a policy is measured in days, and the notice
+		// only has to land before the next eligible purge morning.
+		ComplianceLoop: compliance.NewLoop(complianceSvc, 6*time.Hour),
 	}
 }

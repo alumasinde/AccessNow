@@ -224,6 +224,9 @@ type Manifest struct {
 	ValidFrom  time.Time `db:"valid_from"`
 	ValidUntil time.Time `db:"valid_until"`
 	PushedAt   time.Time `db:"pushed_at"`
+	// TokenHash is the scan token the tablet was handed with this pass. The secret is not
+	// stored; a cache that loses its token is rebuilt, and a hash on its own opens nothing.
+	TokenHash string `db:"token_hash"`
 }
 
 // Conflict is one row a device and the server do not agree about, and what was done about it.
@@ -280,20 +283,22 @@ func (h Health) Silent(now time.Time, after time.Duration) bool {
 	return now.Sub(*h.LastSeenAt) > after
 }
 
-// CachedPass is one pass as the device must hold it. No secret is in it: the QR token half is
-// a different module, and until that exists a tablet honours a pass number, not a signature.
+// CachedPass is one pass as the device must hold it. OfflineToken is the raw scan secret, and
+// it is handed over exactly once per cached pass: the server keeps the hash, the tablet keeps
+// the only copy that can open the barrier while the link is down.
 type CachedPass struct {
-	PassID      int64     `json:"pass_id"`
-	PassNo      string    `json:"pass_no"`
-	Category    string    `json:"category"`
-	Module      string    `json:"source_module"`
-	Status      string    `json:"status"`
-	SubjectName string    `json:"subject_name"`
-	Reason      string    `json:"reason"`
-	ValidFrom   time.Time `json:"valid_from"`
-	ValidUntil  time.Time `json:"valid_until"`
-	EntriesUsed int       `json:"entries_used"`
-	PushedAt    time.Time `json:"pushed_at"`
+	PassID       int64     `json:"pass_id"`
+	PassNo       string    `json:"pass_no"`
+	Category     string    `json:"category"`
+	Module       string    `json:"source_module"`
+	Status       string    `json:"status"`
+	SubjectName  string    `json:"subject_name"`
+	Reason       string    `json:"reason"`
+	ValidFrom    time.Time `json:"valid_from"`
+	ValidUntil   time.Time `json:"valid_until"`
+	EntriesUsed  int       `json:"entries_used"`
+	PushedAt     time.Time `json:"pushed_at"`
+	OfflineToken string    `json:"offline_token,omitempty"`
 }
 
 // CachedListing is one screening entry as the device must hold it. It carries the value the
@@ -343,6 +348,12 @@ type Bundle struct {
 // passes in it, which is what a site that does not screen already asks for.
 type Screenings interface {
 	Cached(ctx context.Context, tenantID int64) ([]CachedListing, error)
+}
+
+// Tokens is the scan module's offline issue seam. The cache stores the hash and hands the
+// secret to the tablet; the same pass_tokens table then resolves a replayed scan.
+type Tokens interface {
+	IssueForOffline(ctx context.Context, tenantID, passID int64, expires time.Time) (secret, hash string, err error)
 }
 
 // NewBatch is one exchange as the ledger files it.

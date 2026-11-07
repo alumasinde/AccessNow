@@ -2,6 +2,7 @@ package movements
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -327,17 +328,36 @@ func (s *Service) screening(ctx context.Context, scope tenancy.Scope, pass passe
 	return "", verdict
 }
 
-// ruleRefusal is the decision Core can make by itself: gate category, validity window, pass
-// status and the entry an exit has to pair against.
+// ruleRefusal is the decision Core can make by itself: the gate's own state and hours, its
+// categories and permitted gates, the pass window and status, and the entry an exit has to
+// pair against.
 func (s *Service) ruleRefusal(ctx context.Context, scope tenancy.Scope, pass passes.Pass, scan Scan) string {
-	categories, err := s.repo.GateCategories(ctx, scope.GateID)
+	rules, err := s.repo.GateRules(ctx, scope.TenantID, scope.GateID, pass.ID)
 	if err != nil {
-		return deny("could not read the gate categories")
+		if errs.CodeOf(err) == errs.CodeNotFound {
+			return deny("this gate is no longer on file")
+		}
+		return deny("could not read the gate's rules")
 	}
-	if len(categories) > 0 && !contains(categories, pass.CategoryKey) {
+	if rules.Status != "active" {
+		return deny("gate is " + rules.Status)
+	}
+
+	now := time.Now().UTC()
+	loc := gateZone(scope.Timezone)
+	if reason := gateHoursRefusal(rules, now, loc); reason != "" {
+		return deny(reason)
+	}
+	if len(rules.Categories) > 0 && !contains(rules.Categories, pass.CategoryKey) {
 		return deny("not valid at this gate")
 	}
-	if !pass.WithinWindow(time.Now().UTC()) {
+	if len(rules.AllowedGates) > 0 && !containsID(rules.AllowedGates, scope.GateID) {
+		return deny("this pass is not valid at this gate")
+	}
+	if reason := gateWindowRefusal(rules.Windows, pass.CategoryKey, now, loc); reason != "" {
+		return deny(reason)
+	}
+	if !pass.WithinWindow(now) {
 		return deny("outside the validity window")
 	}
 	// One status gate for both directions: a pending pass has no permission yet and a
@@ -357,15 +377,131 @@ func (s *Service) ruleRefusal(ctx context.Context, scope tenancy.Scope, pass pas
 		// scan on those rows is an exit, so only a pass with entries behind it needs
 		// an open entry to pair against.
 		if pass.EntryCount > 0 {
-			if _, err := s.repo.OpenEntry(ctx, scope.TenantID, pass.ID); err != nil {
+			entry, err := s.repo.OpenEntry(ctx, scope.TenantID, pass.ID)
+			if err != nil {
 				if errs.CodeOf(err) == errs.CodeNotFound {
 					return deny("no open entry to close")
 				}
 				return deny("could not read the open entry")
 			}
+			if rules.SameGateExit && entry.GateID != scope.GateID {
+				return deny("this pass has to exit through the gate it entered")
+			}
 		}
 	}
 	return ""
+}
+
+// gateHoursRefusal checks the checkpoint's own daily opening hours. A pair that wraps past
+// midnight is read as the overnight window it is rather than as an impossible one.
+func gateHoursRefusal(rules GateRules, now time.Time, loc *time.Location) string {
+	if rules.OpensAt == "" && rules.ClosesAt == "" {
+		return ""
+	}
+	if rules.OpensAt == "" || rules.ClosesAt == "" {
+		return ""
+	}
+	if !insideClock(now, loc, rules.OpensAt, rules.ClosesAt) {
+		return "outside this gate's opening hours"
+	}
+	return ""
+}
+
+// gateWindowRefusal applies the tenant's finer windows. A block that covers now always wins;
+// when the gate has allow windows, being outside all of them is the same refusal. Warn-only
+// windows change no colour, because a warning has no path from this layer to the guard.
+func gateWindowRefusal(windows []GateWindow, category string, now time.Time, loc *time.Location) string {
+	hasAllow, insideAllow, blocked := false, false, false
+	iso := isoWeekday(now.In(loc))
+	for _, window := range windows {
+		if window.Category != nil && *window.Category != "" &&
+			!strings.EqualFold(*window.Category, category) {
+			continue
+		}
+		if window.Day != 0 && window.Day != iso {
+			continue
+		}
+		covered := insideClock(now, loc, window.StartsAt, window.ClosesAt)
+		switch window.Action {
+		case "block":
+			if covered {
+				blocked = true
+			}
+		case "allow":
+			hasAllow = true
+			if covered {
+				insideAllow = true
+			}
+		}
+	}
+	if blocked {
+		return "not permitted at this gate at this time"
+	}
+	if hasAllow && !insideAllow {
+		// An allow window that did not cover now was not marked inside above, so this
+		// branch needs the gate's windows reconsidered: reaching here means no allow
+		// window covered the scan.
+		return "outside this gate's permitted hours"
+	}
+	return ""
+}
+
+func insideClock(now time.Time, loc *time.Location, opens, closes string) bool {
+	start, okStart := clockSeconds(opens)
+	end, okEnd := clockSeconds(closes)
+	if !okStart || !okEnd || start == end {
+		return true
+	}
+	local := now.In(loc)
+	current := local.Hour()*3600 + local.Minute()*60 + local.Second()
+	if end < start {
+		return current >= start || current < end
+	}
+	return current >= start && current < end
+}
+
+func clockSeconds(value string) (int, bool) {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) < 2 {
+		return 0, false
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, false
+	}
+	second := 0
+	if len(parts) > 2 {
+		second, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return 0, false
+		}
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
+		return 0, false
+	}
+	return hour*3600 + minute*60 + second, true
+}
+
+func isoWeekday(at time.Time) int { return (int(at.Weekday())+6)%7 + 1 }
+
+func gateZone(name string) *time.Location {
+	if loc, err := time.LoadLocation(strings.TrimSpace(name)); err == nil {
+		return loc
+	}
+	return time.UTC
+}
+
+func containsID(haystack []int64, needle int64) bool {
+	for _, straw := range haystack {
+		if straw == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // record appends the movement and runs what a granted scan implies. The second result is

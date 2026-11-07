@@ -54,6 +54,7 @@ type PolicyView struct {
 	PurgeAction      string     `json:"purge_action"`
 	NotifyBeforeDays *int       `json:"notify_before_days,omitempty"`
 	LastRunAt        *time.Time `json:"last_run_at,omitempty"`
+	LastNotifiedAt   *time.Time `json:"last_notified_at,omitempty"`
 	IsActive         bool       `json:"is_active"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
@@ -61,7 +62,7 @@ type PolicyView struct {
 func policyView(p Policy) PolicyView {
 	return PolicyView{ID: p.ID, DataCategory: p.DataCategory, RetentionDays: p.RetentionDays,
 		PurgeAction: p.PurgeAction, NotifyBeforeDays: p.NotifyBeforeDays, LastRunAt: p.LastRunAt,
-		IsActive: p.IsActive, UpdatedAt: p.UpdatedAt}
+		LastNotifiedAt: p.LastNotifiedAt, IsActive: p.IsActive, UpdatedAt: p.UpdatedAt}
 }
 
 type HoldView struct {

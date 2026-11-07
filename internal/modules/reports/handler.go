@@ -116,6 +116,28 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, runView(run))
 }
 
+// Download hands back the file a previous run produced, under the same headers the original
+// stream used. The artifact is read from the run row, not regenerated: a report is evidence of
+// what was exported then, not of what the query would return now.
+func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
+	scope, err := tenancy.Require(r.Context())
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	id, err := httpx.ID(r, "runID")
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	artifact, err := h.svc.Download(r.Context(), scope.TenantID, id)
+	if err != nil {
+		httpx.Fail(r.Context(), w, r, err)
+		return
+	}
+	writeArtifact(w, artifact)
+}
+
 func (h *Handler) Schedules(w http.ResponseWriter, r *http.Request) {
 	scope, err := tenancy.Require(r.Context())
 	if err != nil {

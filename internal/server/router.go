@@ -85,6 +85,7 @@ func New(pool *sqlx.DB, deps *Deps, cfg config.Config, logger *slog.Logger) http
 			r.Use(httprate.LimitBy(cfg.ScanRate, time.Minute, httprate.KeyByIP))
 			movements.Register(r, deps.Movements, deps.Guard)
 			offline.RegisterGate(r, deps.Offline, deps.Guard)
+			integrations.RegisterGate(r, deps.Integrations, deps.Guard)
 		})
 	})
 

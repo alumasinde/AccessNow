@@ -58,6 +58,23 @@ func (r *Repository) Permissions(ctx context.Context, tenantID, userID int64) (m
 	return granted, rows.Err()
 }
 
+// IsAuditor answers the one role that is read-only by definition. It is deliberately a role
+// question and not a permission question: an auditor granted a stray write permission must
+// still not be able to change a record, or "read only" is a promise the template keeps and the
+// first edit breaks.
+func (r *Repository) IsAuditor(ctx context.Context, tenantID, userID int64) (bool, error) {
+	const query = `
+		SELECT COUNT(*) > 0
+		FROM   user_roles ur
+		JOIN   roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
+		WHERE  ur.user_id = ? AND ur.tenant_id = ? AND r.role_key = 'auditor' AND r.status = 'active'`
+	var auditor bool
+	if err := r.q.GetContext(ctx, &auditor, query, userID, tenantID); err != nil {
+		return false, fmt.Errorf("read auditor role: %w", err)
+	}
+	return auditor, nil
+}
+
 func (r *Repository) GateWork(ctx context.Context, tenantID, userID int64) (bool, error) {
 	const query = `
 		SELECT COUNT(*) > 0

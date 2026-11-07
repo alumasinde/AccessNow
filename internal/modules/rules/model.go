@@ -94,9 +94,10 @@ func (a Action) Refuses() bool {
 	}
 }
 
-// StageAsked reports whether this rule is in the walk the gate makes. request and nightly are
-// on file, and nothing evaluates them yet - see the note on New.Validate.
-func (s Stage) StageAsked() bool { return s == StageScan || s == StageBoth }
+// StageAsked reports whether this stage has an evaluator. All four do now: request runs when a
+// pass is issued, scan runs inside the barrier, both runs in each place, and nightly runs over
+// the open register on a timer.
+func (s Stage) StageAsked() bool { return s.Valid() }
 
 type Severity string
 

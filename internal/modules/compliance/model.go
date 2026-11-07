@@ -141,6 +141,7 @@ type Policy struct {
 	PurgeAction      string     `db:"purge_action"`
 	NotifyBeforeDays *int       `db:"notify_before_days"`
 	LastRunAt        *time.Time `db:"last_run_at"`
+	LastNotifiedAt   *time.Time `db:"last_notified_at"`
 	IsActive         bool       `db:"is_active"`
 	UpdatedBy        *int64     `db:"updated_by"`
 	CreatedAt        time.Time  `db:"created_at"`

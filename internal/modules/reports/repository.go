@@ -98,17 +98,42 @@ func (r *Repository) InsertRun(ctx context.Context, run Run, at time.Time) (int6
 }
 
 func (r *Repository) FinishRun(ctx context.Context, tenantID, id int64, rows int, fileName string,
-	size int64, checksum string, durationMS int, at time.Time) error {
+	size int64, checksum string, content []byte, contentType string, durationMS int,
+	at time.Time) error {
 	const query = `
 		UPDATE report_runs
 		SET status = 'succeeded', finished_at = ?, duration_ms = ?, row_count = ?,
-		    file_name = ?, file_size_bytes = ?, checksum_sha256 = ?, updated_at = ?
+		    file_name = ?, file_size_bytes = ?, checksum_sha256 = ?, artifact = ?,
+		    artifact_content_type = ?, updated_at = ?
 		WHERE tenant_id = ? AND id = ? AND status = 'running'`
-	if _, err := r.q.ExecContext(ctx, query, at, durationMS, rows, fileName, size, checksum, at,
-		tenantID, id); err != nil {
+	if _, err := r.q.ExecContext(ctx, query, at, durationMS, rows, fileName, size, checksum,
+		content, contentType, at, tenantID, id); err != nil {
 		return fmt.Errorf("finish report run: %w", err)
 	}
 	return nil
+}
+
+// RunArtifact reads a stored export back. It is deliberately separate from Run: the list and
+// the receipt endpoint should not drag a multi-megabyte blob with every row.
+func (r *Repository) RunArtifact(ctx context.Context, tenantID, id int64) (Run, []byte, string, error) {
+	var row struct {
+		Run
+		Artifact []byte `db:"artifact"`
+	}
+	query := `SELECT ` + runColumns + `, artifact
+		FROM report_runs WHERE tenant_id = ? AND id = ?`
+	err := r.q.GetContext(ctx, &row, query, tenantID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, nil, "", errs.NotFound("report run")
+	}
+	if err != nil {
+		return Run{}, nil, "", fmt.Errorf("read report artifact: %w", err)
+	}
+	contentType := "application/octet-stream"
+	if row.Run.ContentType != nil && *row.Run.ContentType != "" {
+		contentType = *row.Run.ContentType
+	}
+	return row.Run, row.Artifact, contentType, nil
 }
 
 func (r *Repository) FailRun(ctx context.Context, tenantID, id int64, code, message string,
@@ -140,8 +165,8 @@ func (r *Repository) Run(ctx context.Context, tenantID, id int64) (Run, error) {
 
 const runColumns = `id, tenant_id, definition_key, report_schedule_id, triggered_by,
 	period_from, period_to, params, format, status, started_at, finished_at, duration_ms,
-	row_count, file_name, file_size_bytes, checksum_sha256, error_code, error_message,
-	requested_by_user_id, created_at`
+	row_count, file_name, file_size_bytes, checksum_sha256, artifact_content_type,
+	error_code, error_message, requested_by_user_id, created_at`
 
 func (r *Repository) Runs(ctx context.Context, filter RunFilter) ([]Run, error) {
 	where := []string{"tenant_id = ?"}

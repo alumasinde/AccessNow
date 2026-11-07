@@ -20,6 +20,7 @@ func Register(r chi.Router, h *Handler, g router.Guard) {
 
 	r.With(desk, see).Get("/reports/runs", h.Runs)
 	r.With(desk, see).Get("/reports/runs/{runID}", h.GetRun)
+	r.With(desk, export).Get("/reports/runs/{runID}/download", h.Download)
 
 	r.With(desk, see).Get("/reports/schedules", h.Schedules)
 	r.With(desk, see).Get("/reports/schedules/{scheduleID}", h.GetSchedule)

@@ -56,6 +56,12 @@ func run() error {
 	// An HR or ERP sync is the same shape: the desk files a job, and this loop is what calls the
 	// remote system, links what came back and records the outcome.
 	go deps.SyncLoop.Run(ctx)
+	// Nightly rules are the one evaluation with no gate and no request to ride: the loop is
+	// what walks the open register.
+	go deps.RulesLoop.Run(ctx)
+	// Retention owners hear before their data becomes purgeable, even when no purge request
+	// has been made yet.
+	go deps.ComplianceLoop.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

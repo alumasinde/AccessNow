@@ -128,6 +128,15 @@ func matchOf(q movements.PolicyQuery) Match {
 	}
 }
 
+func matchFor(q movements.PolicyQuery, stages []string) Match {
+	return Match{
+		TenantID: q.TenantID, SiteID: q.SiteID, GateID: q.GateID,
+		ModuleKey: q.SourceModuleKey, CategoryKey: q.CategoryKey,
+		DepartmentID: q.DepartmentID, PassTypeID: q.PassTypeID,
+		Stages: stages,
+	}
+}
+
 // trees parses the condition trees, and drops a rule whose tree is not a tree. The write path
 // validates before filing, so this only happens to a row edited directly - and a rule that
 // cannot be read is a rule that does not bite, never a gate that will not answer.
@@ -388,10 +397,6 @@ func (in *New) validate(now time.Time) error {
 	if !in.Stage.Valid() {
 		return errs.BadField("stage", "must be request, scan, both or nightly")
 	}
-	if !in.Stage.StageAsked() {
-		return errs.BadField("stage",
-			"nothing evaluates "+string(in.Stage)+" rules yet; use scan or both")
-	}
 	if !in.Action.Valid() {
 		return errs.BadField("action", "must be one of "+strings.Join(actionNames(), ", "))
 	}
@@ -640,7 +645,8 @@ type Catalogue struct {
 func CatalogueOf() Catalogue {
 	return Catalogue{
 		Fields: FieldSpecs(), Operators: OperatorNames(), Actions: actionNames(),
-		Stages: []string{string(StageScan), string(StageBoth)}, Counted: countedBy,
+		Stages:  []string{string(StageRequest), string(StageScan), string(StageBoth), string(StageNightly)},
+		Counted: countedBy,
 	}
 }
 

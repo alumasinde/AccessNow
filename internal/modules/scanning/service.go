@@ -105,6 +105,21 @@ func (s *Service) Issue(ctx context.Context, scope tenancy.Scope, req IssueReque
 	return Issued{Token: token, Secret: secret}, nil
 }
 
+// IssueForOffline mints the token a tablet carries in its cache. The secret and its hash are
+// returned together because the cache stores one and hands the other to the device; the row
+// itself lives in the same pass_tokens table a live scan resolves against.
+func (s *Service) IssueForOffline(ctx context.Context, tenantID, passID int64,
+	expires time.Time) (string, string, error) {
+	scope := tenancy.Scope{TenantID: tenantID}
+	issued, err := s.Issue(ctx, scope, IssueRequest{
+		PassID: passID, ExpiresAt: &expires, Delivery: "device",
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return issued.Secret, security.HashToken(issued.Secret), nil
+}
+
 // Revoke stops a badge that is still in somebody's hand. A revoked token keeps the reason it was
 // revoked for, because the second supervisor to ask "why did this card stop working" deserves
 // the first one's answer.

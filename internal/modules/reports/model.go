@@ -137,30 +137,33 @@ type Schedule struct {
 	UpdatedAt      time.Time  `db:"updated_at"`
 }
 
-// Run is one execution of one definition. FilePath stays NULL: no bytes are stored, so there
-// is nothing to purge and nothing a later request could leak.
+// Run is one execution of one definition. The rendered bytes are kept on the row so the
+// register can hand the same file back later; the retention module can purge that column.
 type Run struct {
-	ID           int64      `db:"id"`
-	TenantID     int64      `db:"tenant_id"`
-	Definition   string     `db:"definition_key"`
-	ScheduleID   *int64     `db:"report_schedule_id"`
-	TriggeredBy  string     `db:"triggered_by"`
-	PeriodFrom   *time.Time `db:"period_from"`
-	PeriodTo     *time.Time `db:"period_to"`
-	Params       string     `db:"params"`
-	Format       string     `db:"format"`
-	Status       string     `db:"status"`
-	StartedAt    *time.Time `db:"started_at"`
-	FinishedAt   *time.Time `db:"finished_at"`
-	DurationMS   *int       `db:"duration_ms"`
-	RowCount     *int       `db:"row_count"`
-	FileName     *string    `db:"file_name"`
-	FileSize     *int64     `db:"file_size_bytes"`
-	Checksum     *string    `db:"checksum_sha256"`
-	ErrorCode    *string    `db:"error_code"`
-	ErrorMessage *string    `db:"error_message"`
-	RequestedBy  *int64     `db:"requested_by_user_id"`
-	CreatedAt    time.Time  `db:"created_at"`
+	ID          int64      `db:"id"`
+	TenantID    int64      `db:"tenant_id"`
+	Definition  string     `db:"definition_key"`
+	ScheduleID  *int64     `db:"report_schedule_id"`
+	TriggeredBy string     `db:"triggered_by"`
+	PeriodFrom  *time.Time `db:"period_from"`
+	PeriodTo    *time.Time `db:"period_to"`
+	Params      string     `db:"params"`
+	Format      string     `db:"format"`
+	Status      string     `db:"status"`
+	StartedAt   *time.Time `db:"started_at"`
+	FinishedAt  *time.Time `db:"finished_at"`
+	DurationMS  *int       `db:"duration_ms"`
+	RowCount    *int       `db:"row_count"`
+	FileName    *string    `db:"file_name"`
+	FileSize    *int64     `db:"file_size_bytes"`
+	Checksum    *string    `db:"checksum_sha256"`
+	// ContentType describes the stored artifact. The bytes are read by RunArtifact and are
+	// never part of a listing.
+	ContentType  *string   `db:"artifact_content_type"`
+	ErrorCode    *string   `db:"error_code"`
+	ErrorMessage *string   `db:"error_message"`
+	RequestedBy  *int64    `db:"requested_by_user_id"`
+	CreatedAt    time.Time `db:"created_at"`
 }
 
 // RunFilter is the run register's question.

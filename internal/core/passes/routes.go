@@ -10,6 +10,10 @@ import (
 // the pass, so they are reached through visit.approve, material.approve and friends.
 func Register(r chi.Router, h *Handler, g router.Guard) {
 	read := g.Chain(g.Session, g.Permission("core.pass.view"))
+	configure := g.Chain(g.Session, g.Permission("core.tenant.settings_update"))
 	r.With(read).Get("/passes", h.List)
+	// Static before the {passID} wildcard, so the numbering scheme is never read as a pass id.
+	r.With(read).Get("/passes/number-formats", h.NumberFormats)
+	r.With(configure).Put("/passes/number-formats/{formatKey}", h.SaveNumberFormat)
 	r.With(read).Get("/passes/{passID}", h.Get)
 }

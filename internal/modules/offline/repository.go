@@ -138,10 +138,8 @@ func (r *Repository) Held(ctx context.Context, deviceID int64, version int64) ([
 // now holds is written at the new version.
 //
 // The full set is written even for the passes the device was not sent again, with their old
-// pushed_at kept, so "what does this tablet hold at version N" is one question with one
-// answer rather than a walk back through every bundle it ever pulled. The token column is
-// written empty: a scan signature is the QR module's to issue, and until it exists a tablet
-// honours a pass number and nothing else.
+// pushed_at and token hash kept, so "what does this tablet hold at version N" is one question
+// with one answer rather than a walk back through every bundle it ever pulled.
 func (r *Repository) Stock(ctx context.Context, deviceID int64, at time.Time,
 	rows []Manifest) error {
 	if err := r.supersede(ctx, deviceID, at); err != nil {
@@ -160,7 +158,7 @@ func (r *Repository) Stock(ctx context.Context, deviceID int64, at time.Time,
 		        superseded_at = NULL`
 	args := make([]any, 0, len(rows)*11)
 	for _, row := range rows {
-		args = append(args, row.TenantID, row.DeviceID, row.GateID, row.PassID, nil,
+		args = append(args, row.TenantID, row.DeviceID, row.GateID, row.PassID, text(row.TokenHash),
 			row.Reason, row.Version, row.ValidFrom.UTC(), row.ValidUntil.UTC(), row.PushedAt.UTC(),
 			at.UTC())
 	}
@@ -319,10 +317,8 @@ func (r *Repository) RefreshConflicts(ctx context.Context, tenantID, batchID int
 	return n, nil
 }
 
-// manifestColumns deliberately does not read token_hash: Stock writes it NULL until the QR
-// module issues a scan signature, so a tablet holds pass numbers and nothing else.
 const manifestColumns = `gate_device_id, pass_id, reason, cache_version, valid_from,
-	valid_until, pushed_at, tenant_id, gate_id`
+	valid_until, pushed_at, tenant_id, gate_id, COALESCE(token_hash, '') AS token_hash`
 
 const conflictFrom = `
 	FROM   sync_conflicts c
